@@ -1,18 +1,23 @@
 const fs = require('fs');
-let code = fs.readFileSync('src/App.jsx', 'utf8');
+const path = 'c:\\Softly built updates\\MpesaListenerApp\\app\\src\\main\\java\\com\\softbuild\\mpesalistener\\MainActivity.kt';
+let content = fs.readFileSync(path, 'utf8');
 
-// Replace .toLowerCase() to be safe for properties.
-const props = ['name', 'barcode', 'category', 'cashierName', 'phone'];
+// 1. Remove validPins completely and inject LICENSE_API_URL
+content = content.replace(/private val validPins = arrayOf\([\s\S]*?\)/, 'private val LICENSE_API_URL = "https://softlybuilt-license-server.netlify.app/.netlify/functions/verify-license"');
 
-for (const p of props) {
-  const regex = new RegExp(`(\\w+)\\.${p}\\.toLowerCase\\(\\)`, 'g');
-  code = code.replace(regex, `($1.${p} || '').toLowerCase()`);
-}
+// 2. Fix post() and body() in btnUnlock block
+content = content.replace(
+    /okhttp3\.RequestBody\.create\(okhttp3\.MediaType\.parse\("application\/json"\), payload\.toString\(\)\)/g,
+    'payload.toString().toRequestBody("application/json".toMediaType())'
+);
+content = content.replace(
+    /response\.body\(\)\?\.string\(\)/g,
+    'response.body?.string()'
+);
 
-// Replace raw standalone variables
-code = code.replace(/\bcategory\.toLowerCase\(\)/g, `(category || '').toLowerCase()`);
-code = code.replace(/\bname\.toLowerCase\(\)/g, `(name || '').toLowerCase()`);
-code = code.replace(/\brawTranscript\.toLowerCase\(\)/g, `(rawTranscript || '').toLowerCase()`);
+// 3. Remove resetInactivityTimer() from unlockApp()
+content = content.replace(/private fun unlockApp\(\) \{\s*lockContainer\?\.visibility = View\.GONE\s*mainContainer\?\.visibility = View\.VISIBLE\s*resetInactivityTimer\(\)\s*\}/, 
+    'private fun unlockApp() {\n        lockContainer?.visibility = View.GONE\n        mainContainer?.visibility = View.VISIBLE\n    }');
 
-fs.writeFileSync('src/App.jsx', code);
-console.log('Fixed toLowerCase.');
+fs.writeFileSync(path, content, 'utf8');
+console.log("Fixes applied");

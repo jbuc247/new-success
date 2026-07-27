@@ -66,8 +66,8 @@ export default async function handler(req, res) {
       if (Array.isArray(parsedData)) {
         const tableConfigs = {
           users: { cols: ['id', 'firebase_uid', 'full_name', 'email', 'role', 'business_id', 'created_at', 'full_json'], getArgs: (item, id) => [id, item.firebase_uid||'', item.full_name||'', item.email||'', item.role||'', item.business_id||'', item.created_at||'', JSON.stringify(item)] },
-          products: { cols: ['id', 'name', 'price', 'costPrice', 'barcode', 'expiryDate', 'quantity', 'category', 'full_json'], getArgs: (item, id) => [id, item.name||'', item.price||0, item.costPrice||0, item.barcode||'', item.expiryDate||'', item.quantity||0, item.category||'', JSON.stringify(item)] },
-          salesHistory: { cols: ['id', 'date', 'total', 'full_json'], getArgs: (item, id) => [id, item.date||'', item.total||0, JSON.stringify(item)] },
+          products: { cols: ['id', 'name', 'price', 'costPrice', 'barcode', 'expiryDate', 'quantity', 'category', 'full_json'], getArgs: (item, id) => [id, item.name||'', item.price||0, item.cost||item.costPrice||0, item.barcode||'', item.expiryDate||'', item.stock||item.quantity||0, item.category||'', JSON.stringify(item)] },
+          salesHistory: { cols: ['id', 'date', 'total', 'full_json'], getArgs: (item, id) => [id, item.date||'', item.total||item.finalPrice||0, JSON.stringify(item)] },
           customers: { cols: ['id', 'name', 'phone', 'full_json'], getArgs: (item, id) => [id, item.name||'', item.phone||'', JSON.stringify(item)] },
           debts: { cols: ['id', 'customerName', 'amount', 'date', 'full_json'], getArgs: (item, id) => [id, item.customerName||item.name||'', item.amount||0, item.date||'', JSON.stringify(item)] },
           paidDebts: { cols: ['id', 'customerName', 'amount', 'date', 'full_json'], getArgs: (item, id) => [id, item.customerName||item.name||'', item.amount||0, item.date||'', JSON.stringify(item)] },
@@ -99,11 +99,10 @@ export default async function handler(req, res) {
     await client.batch(stmts, 'write');
 
     // ✅ Update last_modified timestamp so polling devices detect the change instantly
-    const now = Date.now();
     await client.execute(`CREATE TABLE IF NOT EXISTS meta (id INTEGER PRIMARY KEY, last_modified INTEGER NOT NULL DEFAULT 0)`);
-    await client.execute(`INSERT OR REPLACE INTO meta (id, last_modified) VALUES (1, ${now})`);
+    await client.execute(`INSERT OR REPLACE INTO meta (id, last_modified) VALUES (1, ${Date.now()})`);
 
-    return res.status(200).json({ ok: true, last_modified: now });
+    return res.status(200).json({ ok: true });
   } catch (err) {
     return res.status(200).json({ ok: false, error: err?.message || 'Sync failed.' });
   } finally {

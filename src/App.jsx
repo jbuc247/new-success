@@ -7,7 +7,7 @@ import React, { useState, useEffect, useRef, useMemo, useCallback } from 'react'
       FileText, ClipboardList, Lock, Eye, EyeOff, Volume2, Upload, Download, Music,
       Search, AlertTriangle, MessageCircle, AlertCircle, QrCode, Barcode, Zap, Copy,
       Loader2, Delete, Clock, Key, Tag, Printer, UserPlus, ShoppingCart, Percent, Tag as TagIcon, Save,
-      Truck, Bell, Send, Play, Calendar, Menu, RefreshCw, Smartphone
+      Truck, Bell, Send, Play, Calendar, Menu, RefreshCw, Globe, Database
     } from 'lucide-react';
     import { BarChart, Bar, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer, Cell } from 'recharts';
     import toast, { Toaster } from 'react-hot-toast';
@@ -80,6 +80,18 @@ import React, { useState, useEffect, useRef, useMemo, useCallback } from 'react'
       }
     };
 
+    const deleteFromCloudRegistry = async (storeHandle) => {
+      try {
+        const countRes = await fetch(`${CLOUD_KV_API}/UpdateValue/${APP_NAMESPACE}/${encodeURIComponent(storeHandle)}_count/0`, {
+          method: 'POST'
+        });
+        return countRes.ok;
+      } catch (err) {
+        console.error(err);
+        return false;
+      }
+    };
+
     const downloadFromCloudRegistry = async (storeHandle, masterPassword) => {
       try {
         const countRes = await fetch(`${CLOUD_KV_API}/GetValue/${APP_NAMESPACE}/${encodeURIComponent(storeHandle)}_count`);
@@ -110,28 +122,116 @@ import React, { useState, useEffect, useRef, useMemo, useCallback } from 'react'
     };
 
     // --- IndexedDB UTILS ---
-    const DB_NAME = 'BirkuShopDB';
+    // --- MULTI-STORE MANAGEMENT UTILS ---
+    const getMultiStoreConfig = () => {
+      try {
+        const config = JSON.parse(localStorage.getItem('sb_multi_store_config'));
+        if (config && config.stores && config.stores.length > 0) {
+          if (!config.updatedAt) config.updatedAt = 0;
+          return config;
+        }
+      } catch (e) {}
+      // Default fallback if no config
+      return {
+        activeStoreId: 'default',
+        updatedAt: 0,
+        stores: [{ id: 'default', name: 'Main Store', dbSession: null, isActive: true }]
+      };
+    };
+
+    const saveMultiStoreConfig = (config) => {
+      localStorage.setItem('sb_multi_store_config', JSON.stringify(config));
+    };
+
+    const getActiveStore = () => {
+      const config = getMultiStoreConfig();
+      return config.stores.find(s => s.id === config.activeStoreId) || config.stores[0];
+    };
+
+    const getActiveDbSession = () => {
+      const store = getActiveStore();
+      if (store.id === 'default' && !store.dbSession) {
+        try {
+          const raw = localStorage.getItem('db_session');
+          if (raw) return JSON.parse(raw);
+        } catch {}
+      }
+      return store.dbSession || null;
+    };
+
+    const setActiveDbSessionStr = (str) => {
+      const config = getMultiStoreConfig();
+      const session = str ? JSON.parse(str) : null;
+      const storeIndex = config.stores.findIndex(s => s.id === config.activeStoreId);
+      if (storeIndex > -1) {
+        config.stores[storeIndex].dbSession = session;
+      } else if (config.activeStoreId === 'default') {
+        config.stores.push({ id: 'default', name: 'Main Store', dbSession: session, isActive: true });
+      }
+      saveMultiStoreConfig(config);
+      if (str) {
+         localStorage.setItem('db_session', str); // fallback for default store
+      } else {
+         localStorage.removeItem('db_session');
+      }
+    };
+
+    const getActiveDbSessionStr = () => {
+      const session = getActiveDbSession();
+      return session ? JSON.stringify(session) : null;
+    };
+
+    const getApiUrl = (path) => {
+      if (typeof window !== 'undefined' && window.location) {
+        const origin = window.location.origin;
+        if (origin && origin.startsWith('http')) {
+          const isViteOnly = origin.includes('localhost:5173') || origin.includes('127.0.0.1:5173');
+          const isApkWebview = (origin === 'http://localhost') || origin.startsWith('file:') || origin.startsWith('capacitor:') || origin.startsWith('app:');
+          if (!isViteOnly && !isApkWebview) {
+            return `${origin}${path}`;
+          }
+        }
+      }
+      return `https://softlybuilt.netlify.app${path}`;
+    };
+
+    const getDBNameForStore = (storeId) => {
+      return storeId === 'default' ? 'BirkuShopDB' : `BirkuShopDB_${storeId}`;
+    };
+
     const DB_VERSION = 2;
     const STORE_NAME = 'shopData';
     const PERF_STORE_NAME = 'monthlyPerfData';
-    let db;
+    let activeDb = null;
+    let currentOpenStoreId = null;
 
-    const openDB = () => {
+    const openDB = (forceStoreId = null) => {
       return new Promise((resolve, reject) => {
-        if (db) return resolve(db);
-        const request = indexedDB.open(DB_NAME, DB_VERSION);
+        const targetStoreId = forceStoreId || getMultiStoreConfig().activeStoreId;
+        const targetDbName = getDBNameForStore(targetStoreId);
+        
+        // Return existing cached db only if it matches the target store
+        if (activeDb && currentOpenStoreId === targetStoreId) return resolve(activeDb);
+        
+        if (activeDb) {
+           activeDb.close();
+           activeDb = null;
+        }
+
+        const request = indexedDB.open(targetDbName, DB_VERSION);
         request.onerror = (event) => reject('Error opening DB');
         request.onsuccess = (event) => {
-          db = event.target.result;
-          resolve(db);
+          activeDb = event.target.result;
+          currentOpenStoreId = targetStoreId;
+          resolve(activeDb);
         };
         request.onupgradeneeded = (event) => {
-          const db = event.target.result;
-          if (!db.objectStoreNames.contains(STORE_NAME)) {
-            db.createObjectStore(STORE_NAME, { keyPath: 'key' });
+          const database = event.target.result;
+          if (!database.objectStoreNames.contains(STORE_NAME)) {
+            database.createObjectStore(STORE_NAME, { keyPath: 'key' });
           }
-          if (!db.objectStoreNames.contains(PERF_STORE_NAME)) {
-            db.createObjectStore(PERF_STORE_NAME, { keyPath: 'key' });
+          if (!database.objectStoreNames.contains(PERF_STORE_NAME)) {
+             database.createObjectStore(PERF_STORE_NAME, { keyPath: 'month' });
           }
         };
       });
@@ -224,17 +324,49 @@ import React, { useState, useEffect, useRef, useMemo, useCallback } from 'react'
 
     // --- TURSO SYNC UTILITIES ---
     // Best-effort, fully silent — never throws or blocks POS operations.
+    const getPendingSyncKeys = () => {
+      try {
+        return JSON.parse(localStorage.getItem('sb_pending_sync_keys') || '[]');
+      } catch {
+        return [];
+      }
+    };
+
+    const addPendingSyncKey = (key) => {
+      const keys = getPendingSyncKeys();
+      if (!keys.includes(key)) {
+        keys.push(key);
+        localStorage.setItem('sb_pending_sync_keys', JSON.stringify(keys));
+        localStorage.setItem('has_pending_sync', 'true');
+      }
+    };
+
+    const removePendingSyncKey = (key) => {
+      const keys = getPendingSyncKeys().filter(k => k !== key);
+      localStorage.setItem('sb_pending_sync_keys', JSON.stringify(keys));
+      if (keys.length === 0) {
+        localStorage.setItem('has_pending_sync', 'false');
+      }
+    };
+
+    const clearPendingSyncKeys = () => {
+      localStorage.removeItem('sb_pending_sync_keys');
+      localStorage.setItem('has_pending_sync', 'false');
+    };
+
     const tursoSync = async (key, data) => {
       try {
-        const raw = localStorage.getItem('db_session');
+        const raw = getActiveDbSessionStr();
         if (!raw) return false; // Not connected — skip silently
         const { url, token } = JSON.parse(raw);
         if (!url || !token) return false;
         
-        localStorage.setItem('has_pending_sync', 'true');
-        if (!navigator.onLine) return false;
+        if (!navigator.onLine) {
+          addPendingSyncKey(key);
+          return false;
+        }
 
-        const r = await fetch('/api/sync', {
+        const r = await fetch(getApiUrl('/api/sync'), {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({ url, token, key, value: JSON.stringify(data) }),
@@ -242,34 +374,35 @@ import React, { useState, useEffect, useRef, useMemo, useCallback } from 'react'
         if (r.ok) {
           const resJson = await r.json();
           if (resJson.ok) {
+            removePendingSyncKey(key);
             // Stamp local write time so the polling loop doesn't re-download our own change
             sessionStorage.setItem('sb_last_local_write', String(Date.now()));
             return true;
           }
         }
+        addPendingSyncKey(key);
         return false;
       } catch (_) {
+        addPendingSyncKey(key);
         // Swallow all errors — Turso sync must never crash the POS
         return false;
       }
     };
 
-    // Sync all collections at once (used on initial connect if Turso is empty)
-    const tursoSyncAll = async () => {
+    // Sync pending/all collections (force = true used on initial connect if Turso is empty)
+    const tursoSyncAll = async (force = false) => {
       try {
-        const keys = ['products', 'salesHistory', 'customers', 'debts', 'paidDebts', 'expenses', 'stockHistory', 'settings', 'superAdminSettings'];
-        let successCount = 0;
+        const keys = force
+          ? ['products', 'salesHistory', 'customers', 'debts', 'paidDebts', 'expenses', 'stockHistory', 'settings', 'superAdminSettings']
+          : getPendingSyncKeys();
+        if (keys.length === 0) return;
+        
         for (const k of keys) {
           let val = await loadDataFromDB(k);
           if (val === undefined || val === null) {
-            // Default empty state for collections if they haven't been created yet
             val = (k === 'settings' || k === 'superAdminSettings') ? {} : [];
           }
-          const ok = await tursoSync(k, val);
-          if (ok) successCount++;
-        }
-        if (successCount === keys.length) {
-          localStorage.removeItem('has_pending_sync');
+          await tursoSync(k, val);
         }
       } catch (_) {
         // Silent
@@ -279,22 +412,23 @@ import React, { useState, useEffect, useRef, useMemo, useCallback } from 'react'
     // Pull all data from Turso and overwrite local DB (used when connecting to existing DB)
     const tursoPullAll = async () => {
       try {
-        if (localStorage.getItem('has_pending_sync') === 'true') {
+        const pendingKeys = getPendingSyncKeys();
+        if (pendingKeys.length > 0) {
           await tursoSyncAll();
         }
 
         // CRITICAL FIX: If sync failed, do NOT pull data. Overwriting local data with old cloud data causes data loss!
-        if (localStorage.getItem('has_pending_sync') === 'true') {
+        if (getPendingSyncKeys().length > 0) {
           console.warn("Sync failed, aborting pull to prevent local offline data from being overwritten.");
           return false;
         }
 
-        const raw = localStorage.getItem('db_session');
+        const raw = getActiveDbSessionStr();
         if (!raw) return false;
         const { url, token } = JSON.parse(raw);
         if (!url || !token) return false;
         
-        const res = await fetch('/api/pull', {
+        const res = await fetch(getApiUrl('/api/pull'), {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({ url, token }),
@@ -362,7 +496,8 @@ import React, { useState, useEffect, useRef, useMemo, useCallback } from 'react'
       allowClearMonthlyPerf: false,
       notificationsEnabled: true,
       notifyDebtDays: 5,
-      notifyLowStock: 5
+      notifyLowStock: 5,
+      mpesaListeningEnabled: true
     };
 
     const DEFAULT_SUPER_ADMIN_SETTINGS = { scannerSize: 250, lockPin: '', periodInDays: 0, enablePeriodLock: false, periodStartDate: null };
@@ -518,20 +653,20 @@ import React, { useState, useEffect, useRef, useMemo, useCallback } from 'react'
       const invoiceNumber = `INV-${now.getTime().toString().slice(-6)}`;
       const date = now.toLocaleDateString('en-GB');
       const time = now.toLocaleTimeString('en-US', { hour: '2-digit', minute: '2-digit', hour12: true });
-      const hr = <div style={{ borderTop: '1px dashed #000', margin: '5px 0' }}></div>;
+      const hr = <div style={{ borderTop: '1px dashed #000', margin: '2px 0' }}></div>;
 
       return (
-        <div style={{ fontFamily: 'monospace', fontSize: settings.receiptBodyFontSize || '10pt', color: '#000', width: '280px', padding: '5px' }}>
+        <div style={{ fontFamily: 'monospace', fontSize: settings.receiptBodyFontSize || '10pt', color: '#000', width: '280px', padding: '2px', lineHeight: '1.2' }}>
           <div style={{ textAlign: 'center', fontWeight: 'bold', fontSize: settings.receiptTitleFontSize || '12pt' }}>{settings.name}</div>
           {settings.receiptShowAddress && <div style={{ textAlign: 'center' }}>{settings.address}</div>}
           {settings.receiptShowPhone && <div style={{ textAlign: 'center' }}>Tel: {settings.phone}</div>}
-          <div style={{ height: '10px' }}></div>
+          <div style={{ height: '4px' }}></div>
           <div>Invoice #: {invoiceNumber}</div>
           <div>Date: {date} {time}</div>
           <div>Served By: {cashierName || 'N/A'}</div>
           {customer && customer.name && <div>Customer: {customer.name}</div>}
           {hr}
-          <div style={{ display: 'grid', gridTemplateColumns: '3fr 1fr 1fr 1fr', fontWeight: 'bold', gap: '4px' }}>
+          <div style={{ display: 'grid', gridTemplateColumns: '3fr 1fr 1fr 1fr', fontWeight: 'bold', gap: '2px' }}>
             <span>Item</span>
             <span style={{ textAlign: 'right' }}>Qty</span>
             <span style={{ textAlign: 'right' }}>Price</span>
@@ -539,42 +674,42 @@ import React, { useState, useEffect, useRef, useMemo, useCallback } from 'react'
           </div>
           {hr}
           {cart.map((item, index) => (
-            <div key={index} style={{ display: 'grid', gridTemplateColumns: '3fr 1fr 1fr 1fr', gap: '4px' }}>
+            <div key={index} style={{ display: 'grid', gridTemplateColumns: '3fr 1fr 1fr 1fr', gap: '2px', marginBottom: '2px' }}>
               <span>{item.name}</span>
               <span style={{ textAlign: 'right' }}>{item.quantity}</span>
-              <span style={{ textAlign: 'right' }}>{(Number() || 0).toFixed(2)}</span>
+              <span style={{ textAlign: 'right' }}>{(Number(item.price) || 0).toFixed(2)}</span>
               <span style={{ textAlign: 'right' }}>{(Number(item.price * item.quantity) || 0).toFixed(2)}</span>
             </div>
           ))}
           {hr}
           <div style={{ display: 'flex', justifyContent: 'space-between', fontWeight: 'bold' }}>
             <span>TOTAL:</span>
-            <span>{(Number() || 0).toFixed(2)}</span>
+            <span>{(Number(totals.grandTotal) || 0).toFixed(2)}</span>
           </div>
           {totals.totalDiscount > 0 && (
             <div style={{ display: 'flex', justifyContent: 'space-between' }}>
               <span>Discount:</span>
-              <span>-{(Number() || 0).toFixed(2)}</span>
+              <span>-{(Number(totals.totalDiscount) || 0).toFixed(2)}</span>
             </div>
           )}
           <div style={{ display: 'flex', justifyContent: 'space-between' }}>
             <span>Subtotal:</span>
-            <span>{(Number() || 0).toFixed(2)}</span>
+            <span>{(Number(totals.subtotal) || 0).toFixed(2)}</span>
           </div>
           {hr}
           <div style={{ display: 'flex', justifyContent: 'space-between' }}>
             <span>PAID ({payment.method}):</span>
-            <span>{payment.method === 'Cash' ? (Number() || 0).toFixed(2) : (Number() || 0).toFixed(2)}</span>
+            <span>{payment.method === 'Cash' ? (Number(payment.cashGiven) || 0).toFixed(2) : payment.method === 'Split' ? (Number(payment.mpesaAmount + payment.cashGiven) || 0).toFixed(2) : (Number(totals.grandTotal) || 0).toFixed(2)}</span>
           </div>
-          {payment.method === 'Cash' && payment.change > 0 && (
+          {(payment.method === 'Cash' || payment.method === 'Split') && payment.change > 0 && (
             <div style={{ display: 'flex', justifyContent: 'space-between', fontWeight: 'bold' }}>
               <span>CHANGE:</span>
-              <span>{(Number() || 0).toFixed(2)}</span>
+              <span>{(Number(payment.change) || 0).toFixed(2)}</span>
             </div>
           )}
-          <div style={{ height: '10px' }}></div>
-          {settings.receiptShowExtraInfo && <div style={{ textAlign: 'center' }}>{settings.extraInfo}</div>}
-          <div style={{ height: '10px' }}></div>
+          <div style={{ height: '4px' }}></div>
+          {settings.receiptShowExtraInfo && <div style={{ textAlign: 'center', marginTop: '2px' }}>{settings.extraInfo}</div>}
+          <div style={{ height: '4px' }}></div>
           {settings.receiptLink && settings.receiptShowQr !== false && (
             <QRCodeImage url={settings.receiptLink} />
           )}
@@ -609,22 +744,22 @@ import React, { useState, useEffect, useRef, useMemo, useCallback } from 'react'
 
         cart.forEach(item => {
           text += `${item.name}\n`;
-          text += `  ${item.quantity} x ${(Number() || 0).toFixed(2)} = ${(Number(item.price * item.quantity) || 0).toFixed(2)}\n`;
+          text += `  ${item.quantity} x ${(Number(item.price) || 0).toFixed(2)} = ${(Number(item.price * item.quantity) || 0).toFixed(2)}\n`;
         });
 
         text += hr;
 
-        text += `Subtotal: ${(Number() || 0).toFixed(2)}\n`;
+        text += `Subtotal: ${(Number(totals.subtotal) || 0).toFixed(2)}\n`;
         if (totals.totalDiscount > 0) {
-          text += `Discount: -${(Number() || 0).toFixed(2)}\n`;
+          text += `Discount: -${(Number(totals.totalDiscount) || 0).toFixed(2)}\n`;
         }
-        text += `TOTAL: ${(Number() || 0).toFixed(2)}\n`;
+        text += `TOTAL: ${(Number(totals.grandTotal) || 0).toFixed(2)}\n`;
         text += hr;
 
-        const paidAmount = payment.method === 'Cash' ? (Number() || 0).toFixed(2) : (Number() || 0).toFixed(2);
+        const paidAmount = payment.method === 'Cash' ? (Number(payment.cashGiven) || 0).toFixed(2) : payment.method === 'Split' ? (Number(payment.mpesaAmount + payment.cashGiven) || 0).toFixed(2) : (Number(totals.grandTotal) || 0).toFixed(2);
         text += `PAID (${payment.method}): ${paidAmount}\n`;
-        if (payment.method === 'Cash' && payment.change > 0) {
-          text += `CHANGE: ${(Number() || 0).toFixed(2)}\n`;
+        if ((payment.method === 'Cash' || payment.method === 'Split') && payment.change > 0) {
+          text += `CHANGE: ${(Number(payment.change) || 0).toFixed(2)}\n`;
         }
         text += '\n';
         if (settings.receiptShowExtraInfo) text += `${settings.extraInfo}\n\n`;
@@ -734,6 +869,100 @@ import React, { useState, useEffect, useRef, useMemo, useCallback } from 'react'
             </div>
 
             <div className="p-8 space-y-8">
+              {/* Master Catalog Settings */}
+              <section className="space-y-4">
+                <h3 className="text-lg font-bold text-slate-800 flex items-center gap-2"><FileText className="w-5 h-5 text-emerald-600" /> Master Catalog CSV</h3>
+                <div className="bg-slate-50 p-6 rounded-xl border border-slate-100 grid grid-cols-1 gap-6">
+                  <div className="flex items-center justify-between bg-white p-4 rounded-xl border border-slate-200">
+                    <div>
+                      <div className="font-semibold text-sm text-slate-900">Enable Master Catalog Scanning</div>
+                      <div className="text-xs text-slate-500 mt-1">Allow cashiers to quickly add new products by scanning them against the master catalog.</div>
+                    </div>
+                    <label className="relative inline-flex items-center cursor-pointer">
+                      <input type="checkbox" className="sr-only peer" checked={settings.enableMasterCatalogScan || false} onChange={e => {
+                        updateSettings({ ...settings, enableMasterCatalogScan: e.target.checked });
+                      }} />
+                      <div className="w-11 h-6 bg-slate-200 rounded-full peer peer-checked:after:translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-white after:border-gray-300 after:border after:rounded-full after:h-5 after:w-5 after:transition-all peer-checked:bg-emerald-600"></div>
+                    </label>
+                  </div>
+                  <div className="flex items-center justify-between bg-white p-4 rounded-xl border border-slate-200">
+                    <div>
+                      <div className="font-semibold text-sm text-slate-900">Scanning Method</div>
+                      <div className="text-xs text-slate-500 mt-1">Choose between External Scanner (USB/Bluetooth) or Device Camera.</div>
+                    </div>
+                    <select value={settings.masterCatalogScanMethod || 'external'} onChange={e => updateSettings({ ...settings, masterCatalogScanMethod: e.target.value })} className="input-field py-1 text-sm w-40 border-slate-300">
+                      <option value="external">External Scanner</option>
+                      <option value="camera">Device Camera</option>
+                    </select>
+                  </div>
+
+                  <div>
+                    <label className="block text-sm font-semibold text-slate-700 mb-1">Upload Master CSV</label>
+                    <input type="file" accept=".csv" className="block w-full text-sm text-slate-500 file:mr-4 file:py-2 file:px-4 file:rounded-full file:border-0 file:text-sm file:font-semibold file:bg-emerald-50 file:text-emerald-700 hover:file:bg-emerald-100" onChange={e => {
+                      const file = e.target.files[0];
+                      if (!file) return;
+                      const reader = new FileReader();
+                      reader.onload = (ev) => {
+                        try {
+                          const text = ev.target.result;
+                          const lines = text.split('\n');
+                          const parsed = [];
+                          const fileId = crypto.randomUUID();
+                          for (const line of lines) {
+                            if (!line.trim()) continue;
+                            const cols = line.split(',').map(s => s.trim());
+                            if (cols.length >= 7) {
+                              parsed.push({
+                                barcode: cols[0],
+                                name: cols[1],
+                                price: cols[2],
+                                cat: cols[3],
+                                cost: cols[4],
+                                fileId: fileId
+                              });
+                            }
+                          }
+                          const existingCatalog = settings.masterCatalog || [];
+                          const existingFiles = settings.masterCatalogFiles || [];
+                          const newFiles = [...existingFiles, { id: fileId, name: file.name, count: parsed.length, uploadedAt: Date.now() }];
+                          const newCatalog = [...existingCatalog, ...parsed];
+                          updateSettings({ ...settings, masterCatalog: newCatalog, masterCatalogFiles: newFiles });
+                          toast.success(`Loaded ${parsed.length} products from ${file.name}!`);
+                        } catch (err) {
+                          toast.error("Error parsing CSV");
+                        }
+                      };
+                      reader.readAsText(file);
+                      e.target.value = '';
+                    }} />
+                    <p className="text-xs text-slate-500 mt-2 mb-4">Format: Barcode, Name, Selling Price, Category, Cost, Stock, Expiry Date</p>
+                    
+                    {settings.masterCatalogFiles && settings.masterCatalogFiles.length > 0 && (
+                      <div className="space-y-2 mt-4 border-t border-slate-200 pt-4">
+                        <div className="flex justify-between items-center mb-2">
+                          <div className="text-sm font-bold text-slate-700">Uploaded Files ({settings.masterCatalogFiles.length})</div>
+                          <div className="text-xs font-bold text-emerald-600">Total Products: {settings.masterCatalog?.length || 0}</div>
+                        </div>
+                        {settings.masterCatalogFiles.map(f => (
+                          <div key={f.id} className="flex items-center justify-between bg-white border border-slate-200 p-2 rounded-lg">
+                            <div>
+                               <div className="text-sm font-semibold text-slate-800">{f.name}</div>
+                               <div className="text-xs text-slate-500">{f.count} products</div>
+                            </div>
+                            <button onClick={() => {
+                               const newFiles = settings.masterCatalogFiles.filter(x => x.id !== f.id);
+                               const newCatalog = (settings.masterCatalog || []).filter(x => x.fileId !== f.id);
+                               updateSettings({ ...settings, masterCatalog: newCatalog, masterCatalogFiles: newFiles });
+                               toast.success(`Removed ${f.name}`);
+                            }} className="text-slate-400 hover:text-red-500 hover:bg-red-50 p-2 rounded-lg transition-colors" title="Delete File"><X className="w-5 h-5" /></button>
+                          </div>
+                        ))}
+                      </div>
+                    )}
+                  </div>
+                </div>
+              </section>
+
               {/* Scanner Settings */}
               <section className="space-y-4">
                 <h3 className="text-lg font-bold text-slate-800 flex items-center gap-2"><QrCode className="w-5 h-5 text-emerald-600" /> Scanner Configuration</h3>
@@ -874,7 +1103,8 @@ import React, { useState, useEffect, useRef, useMemo, useCallback } from 'react'
             <div style={{ padding: '40px', textAlign: 'center', background: '#f8fafc', minHeight: '300px', display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', borderRadius: '16px' }}>
               <div style={{ fontSize: '48px', marginBottom: '16px' }}>⚠️</div>
               <h2 style={{ color: '#1e293b', fontWeight: 700, marginBottom: '8px' }}>Something went wrong</h2>
-              <p style={{ color: '#64748b', marginBottom: '24px', maxWidth: '400px' }}>A display error occurred, possibly due to a product with missing data. Try refreshing or clearing the category filter.</p>
+              <p style={{ color: '#64748b', marginBottom: '8px', maxWidth: '400px' }}>A display error occurred, possibly due to a product with missing data. Try refreshing or clearing the category filter.</p>
+              {this.state.error && <p style={{ color: '#dc2626', fontSize: '12px', marginBottom: '16px', maxWidth: '500px', wordBreak: 'break-all', background: '#fef2f2', padding: '8px', borderRadius: '6px' }}><strong>Error:</strong> {this.state.error.message}</p>}
               <button onClick={() => this.setState({ hasError: false, error: null })} style={{ background: '#059669', color: 'white', border: 'none', borderRadius: '10px', padding: '12px 28px', fontWeight: 700, cursor: 'pointer', fontSize: '15px' }}>Try Again</button>
             </div>
           );
@@ -1139,10 +1369,13 @@ import React, { useState, useEffect, useRef, useMemo, useCallback } from 'react'
     // --- MAIN PANELS (HELPER COMPONENTS) ---
     const CartItem = ({ item, onUpdate, onRemove, currentUser }) => {
       const canDiscount = currentUser?.role === 'owner' || currentUser?.permissions?.canDiscount;
+      const safePrice = Number(item.price) || 0;
+      const safeQty = Number(item.quantity) || 0;
+      const safeDiscount = Number(item.discountValue) || 0;
       return (<div className="p-3 border-b border-slate-100 space-y-2">
-        <div className="flex justify-between items-start"><div className="font-medium text-sm text-slate-800 flex-1 pr-2">{item.name}</div><button aria-label="Remove item" onClick={() => onRemove(item.cartId)} className="p-1 -mr-1 text-slate-400 hover:text-red-500"><Trash2 className="w-4 h-4" /></button></div>
-        <div className="flex items-center gap-3"><input id="field-12" name="field-12" type="number" step="any" value={item.quantity} onChange={(e) => onUpdate(item.cartId, { quantity: parseFloat(e.target.value) || 0 })} className="input-field p-1.5 text-center w-20" /><span className="text-xs text-slate-400">x</span><span className="text-sm font-medium text-slate-600">Ksh {item.price.toLocaleString()}</span><span className="text-sm font-bold text-slate-800 ml-auto">Ksh ${(item.price * item.quantity).toLocaleString()}</span></div>
-        {canDiscount && <div className="flex items-center gap-2"><select value={item.discountType} onChange={(e) => onUpdate(item.cartId, { discountType: e.target.value })} className="input-field p-1.5 text-xs w-24"><option value="amount">Discount Ksh</option><option value="percent">Discount %</option></select><input id="field-13" name="field-13" type="number" value={item.discountValue} onChange={(e) => onUpdate(item.cartId, { discountValue: parseFloat(e.target.value) || 0 })} className="input-field p-1.5 text-xs" placeholder="Value" /></div>}
+        <div className="flex justify-between items-start"><div className="font-medium text-sm text-slate-800 flex-1 pr-2">{item.name || '(Unnamed)'}</div><button aria-label="Remove item" onClick={() => onRemove(item.cartId)} className="p-1 -mr-1 text-slate-400 hover:text-red-500"><Trash2 className="w-4 h-4" /></button></div>
+        <div className="flex items-center gap-3"><input id="field-12" name="field-12" type="number" step="any" value={safeQty} onChange={(e) => onUpdate(item.cartId, { quantity: parseFloat(e.target.value) || 0 })} className="input-field p-1.5 text-center w-20" /><span className="text-xs text-slate-400">x</span><span className="text-sm font-medium text-slate-600">Ksh {safePrice.toLocaleString()}</span><span className="text-sm font-bold text-slate-800 ml-auto">Ksh {(safePrice * safeQty).toLocaleString()}</span></div>
+        {canDiscount && <div className="flex items-center gap-2"><select value={item.discountType || 'amount'} onChange={(e) => onUpdate(item.cartId, { discountType: e.target.value })} className="input-field p-1.5 text-xs w-24"><option value="amount">Discount Ksh</option><option value="percent">Discount %</option></select><input id="field-13" name="field-13" type="number" value={safeDiscount} onChange={(e) => onUpdate(item.cartId, { discountValue: parseFloat(e.target.value) || 0 })} className="input-field p-1.5 text-xs" placeholder="Value" /></div>}
       </div>);
     };
 
@@ -1166,7 +1399,7 @@ import React, { useState, useEffect, useRef, useMemo, useCallback } from 'react'
     const CartPanel = ({ cart, onUpdate, onRemove, onClear, onCheckout, currentUser }) => {
       const { subtotal, totalDiscount, grandTotal } = useMemo(() => {
         let subtotal = 0, totalDiscount = 0;
-        cart.forEach(item => { const itemTotal = item.price * item.quantity; subtotal += itemTotal; totalDiscount += item.discountType === 'percent' ? itemTotal * (item.discountValue / 100) : item.discountValue; });
+        cart.forEach(item => { const safePrice = Number(item.price) || 0; const safeQty = Number(item.quantity) || 0; const safeDiscount = Number(item.discountValue) || 0; const itemTotal = safePrice * safeQty; subtotal += itemTotal; totalDiscount += item.discountType === 'percent' ? itemTotal * (safeDiscount / 100) : safeDiscount; });
         return { subtotal, totalDiscount, grandTotal: subtotal - totalDiscount };
       }, [cart]);
 
@@ -1180,22 +1413,107 @@ import React, { useState, useEffect, useRef, useMemo, useCallback } from 'react'
         </div>)}
       </div>);
     };
-
-    const CheckoutModal = ({ cart, onConfirm, onClose, currentUser, printData, settings, customers, updateCustomers }) => {
+    const CheckoutModal = ({ cart, onConfirm, onClose, onKeepShopping, currentUser, printData, settings, customers, updateCustomers, globalMpesa, setGlobalMpesa, debts, updateDebts }) => {
       const [paymentMethod, setPaymentMethod] = useState('Cash');
       const [cashGiven, setCashGiven] = useState(0);
+      const [splitCashGiven, setSplitCashGiven] = useState(0);
       const [confirmedSaleDetails, setConfirmedSaleDetails] = useState(null);
       const [customerName, setCustomerName] = useState('');
       const [customerPhone, setCustomerPhone] = useState('+254');
       const [customerSearch, setCustomerSearch] = useState('');
+      const [debtCustomerId, setDebtCustomerId] = useState('');
+      const [debtCustomerSearch, setDebtCustomerSearch] = useState('');
 
-      const totals = useMemo(() => { let subtotal = 0, totalDiscount = 0; cart.forEach(item => { const itemTotal = item.price * item.quantity; subtotal += itemTotal; totalDiscount += item.discountType === 'percent' ? itemTotal * (item.discountValue / 100) : item.discountValue; }); return { subtotal, totalDiscount, grandTotal: subtotal - totalDiscount }; }, [cart]);
+      // M-Pesa live confirmation (reads the SMS-forwarder app's polling endpoint)
+      const [mpesaStatus, setMpesaStatus] = useState('idle'); // idle | waiting | matched | manual
+      const [mpesaTxCode, setMpesaTxCode] = useState(null);
+      const [mpesaSender, setMpesaSender] = useState(null);
+      const [mpesaAmount, setMpesaAmount] = useState(0);
+      const [mpesaManualCode, setMpesaManualCode] = useState('');
+      const [availableMpesaTx, setAvailableMpesaTx] = useState([]);
+      const [mpesaTxId, setMpesaTxId] = useState(null);
+      const mpesaPollBusyRef = useRef(false);
+      const mpesaAutoConfirmedRef = useRef(false);
+
+      const totals = useMemo(() => { let subtotal = 0, totalDiscount = 0; (cart || []).filter(Boolean).forEach(item => { const safePrice = Number(item.price) || 0; const safeQty = Number(item.quantity) || 0; const safeDiscount = Number(item.discountValue) || 0; const itemTotal = safePrice * safeQty; subtotal += itemTotal; totalDiscount += item.discountType === 'percent' ? itemTotal * (safeDiscount / 100) : safeDiscount; }); return { subtotal, totalDiscount, grandTotal: subtotal - totalDiscount }; }, [cart]);
 
       const change = cashGiven - totals.grandTotal;
 
+      // Reset M-Pesa confirmation state whenever the payment method or cart total changes,
+      // so a stale match from a previous attempt can never be reused.
+      const mpesaListeningEnabled = settings?.mpesaListeningEnabled !== false;
+
+      useEffect(() => {
+        if (paymentMethod === 'M-Pesa') {
+          setMpesaStatus(mpesaListeningEnabled ? 'waiting' : 'idle');
+        } else {
+          setMpesaStatus('idle');
+        }
+        setMpesaTxCode(null);
+        setMpesaSender(null);
+        setMpesaAmount(0);
+        setMpesaManualCode('');
+        setAvailableMpesaTx([]);
+        setMpesaTxId(null);
+        mpesaAutoConfirmedRef.current = false;
+      }, [paymentMethod, totals.grandTotal, mpesaListeningEnabled]);
+
+      // Poll the database for recent M-Pesa transactions (only when listener is enabled)
+      useEffect(() => {
+        if (paymentMethod !== 'M-Pesa' || mpesaStatus !== 'waiting' || confirmedSaleDetails || !mpesaListeningEnabled) return;
+
+        const CONSUMED_KEY = 'sb_consumed_mpesa_tx';
+        const getConsumed = () => { try { return JSON.parse(localStorage.getItem(CONSUMED_KEY)) || []; } catch { return []; } };
+
+        const poll = async () => {
+          if (mpesaPollBusyRef.current) return;
+          mpesaPollBusyRef.current = true;
+          try {
+            const raw = getActiveDbSessionStr();
+            if (!raw) return;
+            const { url, token } = JSON.parse(raw);
+            if (!url || !token) return;
+
+            const res = await fetch(getApiUrl('/api/get-transactions'), {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({ url, token })
+            });
+            const data = await res.json();
+            if (!data.ok || !data.transactions) return;
+
+            const consumed = getConsumed();
+            // Allow all unconsumed transactions so undercharges can be used for Split payments
+            const valid = data.transactions.filter(tx => {
+               if (consumed.includes(tx.id)) return false;
+               return true;
+            });
+            setAvailableMpesaTx(valid);
+          } catch (e) {
+            // silent retry
+          } finally {
+            mpesaPollBusyRef.current = false;
+          }
+        };
+
+        poll();
+        const interval = setInterval(poll, 3000);
+        return () => clearInterval(interval);
+      }, [paymentMethod, mpesaStatus, confirmedSaleDetails, totals.grandTotal]);
+
+      // Auto-complete the sale a moment after a matching M-Pesa payment is detected,
+      // so the cashier sees the "matched" confirmation before the receipt screen appears.
+      useEffect(() => {
+        if (mpesaStatus === 'matched' && mpesaTxCode && !mpesaAutoConfirmedRef.current && !confirmedSaleDetails && mpesaAmount === totals.grandTotal) {
+          mpesaAutoConfirmedRef.current = true;
+          const t = setTimeout(() => handleConfirm(mpesaTxCode), 900);
+          return () => clearTimeout(t);
+        }
+      }, [mpesaStatus, mpesaTxCode, confirmedSaleDetails, mpesaAmount, totals.grandTotal]);
+
       const isPhoneValid = useMemo(() => {
         if (!customerPhone) return false;
-        const digits = customerPhone.replace(/\D/g, '');
+        const digits = String(customerPhone || '').replace(/\D/g, '');
         return digits.length >= 10;
       }, [customerPhone]);
 
@@ -1214,19 +1532,48 @@ import React, { useState, useEffect, useRef, useMemo, useCallback } from 'react'
         message += `-----------------------------------\n`;
         cart.forEach(item => {
           message += `${item.name}\n`;
-          message += `  ${item.quantity} x ${(Number() || 0).toFixed(2)} = ${(Number(item.quantity * item.price) || 0).toFixed(2)}\n`;
+          message += `  ${item.quantity} x ${(Number(item.price) || 0).toFixed(2)} = ${(Number(item.quantity * item.price) || 0).toFixed(2)}\n`;
         });
         message += `-----------------------------------\n`;
-        message += `*TOTAL: Ksh ${(Number() || 0).toFixed(2)}*\n`;
-        if (totals.totalDiscount > 0) message += `(Discount Applied: Ksh ${(Number() || 0).toFixed(2)})\n`;
-        message += `Paid (${payment.method}): Ksh ${payment.method === 'Cash' ? (Number() || 0).toFixed(2) : (Number() || 0).toFixed(2)}\n`;
-        if (payment.method === 'Cash' && payment.change > 0) message += `Change: Ksh ${(Number() || 0).toFixed(2)}\n`;
+        message += `*TOTAL: Ksh ${(Number(totals.grandTotal) || 0).toFixed(2)}*\n`;
+        if (totals.totalDiscount > 0) message += `(Discount Applied: Ksh ${(Number(totals.totalDiscount) || 0).toFixed(2)})\n`;
+        const paidAmount = payment.method === 'Cash' ? (Number(payment.cashGiven) || 0).toFixed(2) : payment.method === 'Split' ? (Number(payment.mpesaAmount + payment.cashGiven) || 0).toFixed(2) : (Number(totals.grandTotal) || 0).toFixed(2);
+        message += `Paid (${payment.method}): Ksh ${paidAmount}\n`;
+        if ((payment.method === 'Cash' || payment.method === 'Split') && payment.change > 0) message += `Change: Ksh ${(Number(payment.change) || 0).toFixed(2)}\n`;
         message += `\n${settings.receiptFooter}`;
         return message;
       };
 
-      const handleConfirm = () => {
+      const handleConfirm = (txCode = null) => {
+        let finalMethod = paymentMethod;
+        let finalCash = cashGiven;
+        let finalChange = change;
+
         if (paymentMethod === 'Cash' && cashGiven < totals.grandTotal) { return toast.error('Cash given is less than the total amount.'); }
+        if (paymentMethod === 'M-Pesa') {
+          if (mpesaListeningEnabled && (!txCode || !String(txCode).trim())) { return toast.error('Waiting for M-Pesa confirmation, or enter the code manually.'); }
+          if (mpesaStatus === 'matched' && mpesaAmount > totals.grandTotal) { return toast.error('Overpayment detected. Add more products before confirming.'); }
+          if (mpesaStatus === 'matched' && mpesaAmount < totals.grandTotal) {
+            if (mpesaAmount + splitCashGiven < totals.grandTotal) { return toast.error('Total payment (M-Pesa + Cash) is less than the total amount.'); }
+            finalMethod = 'Split';
+            finalCash = splitCashGiven;
+            finalChange = (mpesaAmount + splitCashGiven) - totals.grandTotal;
+          }
+        }
+
+        // Debt validation: must select a customer
+        if (paymentMethod === 'Debt') {
+          if (!debtCustomerId) { return toast.error('Please select a customer for the debt.'); }
+        }
+
+        // Mark assigned M-Pesa transaction as consumed so it isn't listed again
+        if (paymentMethod === 'M-Pesa' && mpesaTxId) {
+            const CONSUMED_KEY = 'sb_consumed_mpesa_tx';
+            let list = [];
+            try { list = JSON.parse(localStorage.getItem(CONSUMED_KEY)) || []; } catch {}
+            list.push(mpesaTxId);
+            localStorage.setItem(CONSUMED_KEY, JSON.stringify(list.slice(-100)));
+        }
 
         // Auto-add new customer if details are filled and they don't exist
         if (customerName && isPhoneValid && !customers.some(c => c.name === customerName && c.phone === customerPhone)) {
@@ -1235,7 +1582,12 @@ import React, { useState, useEffect, useRef, useMemo, useCallback } from 'react'
           toast.success(`${customerName} added to customers.`, { duration: 2000 });
         }
 
-        const saleDetails = { cart, totals, payment: { method: paymentMethod, cashGiven, change }, customer: { name: customerName, phone: customerPhone } };
+        // Resolve debt customer details
+        const selectedDebtCustomer = paymentMethod === 'Debt' ? customers.find(c => c.id === debtCustomerId) : null;
+        const effectiveCustomerName = paymentMethod === 'Debt' && selectedDebtCustomer ? selectedDebtCustomer.name : customerName;
+        const effectiveCustomerPhone = paymentMethod === 'Debt' && selectedDebtCustomer ? selectedDebtCustomer.phone : customerPhone;
+
+        const saleDetails = { cart, totals, payment: { method: finalMethod, cashGiven: finalCash, change: finalChange, mpesaAmount: paymentMethod === 'M-Pesa' ? mpesaAmount : 0, mpesaRef: typeof txCode === 'string' ? txCode : null }, customer: { name: effectiveCustomerName, phone: effectiveCustomerPhone }, debtCustomer: selectedDebtCustomer };
         onConfirm(saleDetails);
         setConfirmedSaleDetails(saleDetails);
       };
@@ -1259,7 +1611,7 @@ import React, { useState, useEffect, useRef, useMemo, useCallback } from 'react'
 
       useEffect(() => { if (totals.grandTotal > 0) setCashGiven(totals.grandTotal); }, [totals.grandTotal]);
 
-      const filteredCustomers = useMemo(() => customerSearch ? customers.filter(c => (c.name || '').toLowerCase().includes(customerSearch.toLowerCase()) || c.phone.includes(customerSearch)) : [], [customers, customerSearch]);
+      const filteredCustomers = useMemo(() => customerSearch ? (customers || []).filter(c => (c.name || '').toLowerCase().includes(String(customerSearch || '').toLowerCase()) || String(c.phone || '').includes(customerSearch)) : [], [customers, customerSearch]);
 
       return (<div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 backdrop-blur-sm p-4"><div className="bg-white rounded-2xl w-full max-w-lg shadow-2xl relative">
         <div className="p-4 border-b flex justify-between items-center bg-slate-50">
@@ -1281,27 +1633,231 @@ import React, { useState, useEffect, useRef, useMemo, useCallback } from 'react'
               </button>
             </div>
             {!isPhoneValid && confirmedSaleDetails.customer.phone && <p className="text-xs text-red-500 -mt-4 mb-4">A valid phone number is required for WhatsApp.</p>}
-            <button onClick={onClose} className="font-bold text-emerald-600 hover:underline w-full py-3">Start New Sale</button>
           </div>
-        ) : (<>
-          <div className="p-6 space-y-4"><div className="bg-slate-50 p-4 rounded-lg space-y-2 border border-slate-200"><div className="flex justify-between text-sm"><span className="text-slate-500">Subtotal:</span><span className="font-medium">Ksh. {totals.subtotal.toLocaleString()}</span></div><div className="flex justify-between text-sm"><span className="text-slate-500">Discount:</span><span className="font-medium text-red-500">- Ksh. {totals.totalDiscount.toLocaleString()}</span></div><div className="flex justify-between text-lg font-bold"><span className="text-slate-800">Total Price:</span><span className="text-emerald-600">Ksh. {totals.grandTotal.toLocaleString()}</span></div></div><div className="grid grid-cols-2 gap-4"><div><label className="text-sm font-medium text-slate-600">Payment Method</label><select value={paymentMethod} onChange={e => setPaymentMethod(e.target.value)} className="input-field"><option value="Cash">Cash</option><option value="M-Pesa">M-Pesa</option></select></div>{paymentMethod === 'Cash' && (<div><label className="text-sm font-medium text-slate-600">Cash Given</label><input id="field-17" name="field-17" type="number" value={cashGiven} onChange={e => setCashGiven(parseFloat(e.target.value) || 0)} className="input-field" /><div className="flex gap-1 mt-2"><button onClick={() => setCashGiven(100)} className="flex-1 bg-slate-100 hover:bg-emerald-100 hover:text-emerald-700 text-slate-600 py-1 rounded text-xs font-medium transition-colors">100</button><button onClick={() => setCashGiven(200)} className="flex-1 bg-slate-100 hover:bg-emerald-100 hover:text-emerald-700 text-slate-600 py-1 rounded text-xs font-medium transition-colors">200</button><button onClick={() => setCashGiven(500)} className="flex-1 bg-slate-100 hover:bg-emerald-100 hover:text-emerald-700 text-slate-600 py-1 rounded text-xs font-medium transition-colors">500</button><button onClick={() => setCashGiven(1000)} className="flex-1 bg-slate-100 hover:bg-emerald-100 hover:text-emerald-700 text-slate-600 py-1 rounded text-xs font-medium transition-colors">1000</button></div></div>)}</div>{paymentMethod === 'Cash' && change >= 0 && (<div className="flex justify-between text-lg font-bold border-t pt-3 mt-3"><span className="text-slate-800">Change:</span><span className="text-blue-600">Ksh. {change.toLocaleString()}</span></div>)}
-            <div className="pt-4 border-t mt-4 space-y-3">
-              <h4 className="text-sm font-semibold text-slate-700">Customer Details (Optional)</h4>
-              <div className="relative">
-                <input id="field-18" name="field-18" type="text" value={customerSearch} onChange={e => setCustomerSearch(e.target.value)} className="input-field" placeholder="Search existing customer..." />
-                {filteredCustomers.length > 0 && (
-                  <div className="absolute z-10 w-full bg-white border rounded-lg mt-1 max-h-32 overflow-auto shadow-lg">
-                    {filteredCustomers.map(c => <div key={c.id} onClick={() => handleSelectCustomer(c)} className="p-2 hover:bg-emerald-50 cursor-pointer text-sm">{c.name} - {c.phone}</div>)}
+        ) : (
+          <>
+            <div className="p-6 space-y-4">
+              <div className="bg-slate-50 p-4 rounded-lg space-y-2 border border-slate-200">
+                <div className="flex justify-between text-sm"><span className="text-slate-500">Subtotal:</span><span className="font-medium">Ksh. {totals.subtotal.toLocaleString()}</span></div>
+                <div className="flex justify-between text-sm"><span className="text-slate-500">Discount:</span><span className="font-medium text-red-500">- Ksh. {totals.totalDiscount.toLocaleString()}</span></div>
+                <div className="flex justify-between text-lg font-bold"><span className="text-slate-800">Total Price:</span><span className="text-emerald-600">Ksh. {totals.grandTotal.toLocaleString()}</span></div>
+              </div>
+              <div className="grid grid-cols-2 gap-4">
+                <div>
+                  <label className="text-sm font-medium text-slate-600">Payment Method</label>
+                  <select value={paymentMethod} onChange={e => setPaymentMethod(e.target.value)} className="input-field">
+                    <option value="Cash">Cash</option>
+                    <option value="M-Pesa">M-Pesa</option>
+                    <option value="Debt">Debt (Credit)</option>
+                  </select>
+                </div>
+                {paymentMethod === 'Cash' && (
+                  <div>
+                    <label className="text-sm font-medium text-slate-600">Cash Given</label>
+                    <input id="field-17" name="field-17" type="number" value={cashGiven} onChange={e => setCashGiven(parseFloat(e.target.value) || 0)} className="input-field" />
+                    <div className="flex gap-1 mt-2">
+                      <button onClick={() => setCashGiven(100)} className="flex-1 bg-slate-100 hover:bg-emerald-100 hover:text-emerald-700 text-slate-600 py-1 rounded text-xs font-medium transition-colors">100</button>
+                      <button onClick={() => setCashGiven(200)} className="flex-1 bg-slate-100 hover:bg-emerald-100 hover:text-emerald-700 text-slate-600 py-1 rounded text-xs font-medium transition-colors">200</button>
+                      <button onClick={() => setCashGiven(500)} className="flex-1 bg-slate-100 hover:bg-emerald-100 hover:text-emerald-700 text-slate-600 py-1 rounded text-xs font-medium transition-colors">500</button>
+                      <button onClick={() => setCashGiven(1000)} className="flex-1 bg-slate-100 hover:bg-emerald-100 hover:text-emerald-700 text-slate-600 py-1 rounded text-xs font-medium transition-colors">1000</button>
+                    </div>
                   </div>
                 )}
               </div>
-              <div className="grid grid-cols-2 gap-4">
-                <input id="field-19" name="field-19" type="text" value={customerName} onChange={e => setCustomerName(e.target.value)} className="input-field" placeholder="Customer Name" />
-                <input id="field-20" name="field-20" type="text" value={customerPhone} onChange={e => setCustomerPhone(e.target.value)} className="input-field" placeholder="Phone e.g. +2547..." />
-              </div>
+              {paymentMethod === 'Cash' && change >= 0 && (
+                <div className="flex justify-between text-lg font-bold border-t pt-3 mt-3">
+                  <span className="text-slate-800">Change:</span>
+                  <span className="text-blue-600">Ksh. {change.toLocaleString()}</span>
+                </div>
+              )}
             </div>
-          </div>
-          <div className="p-4 bg-slate-50 border-t flex justify-end"><button onClick={handleConfirm} className="btn-primary py-3 px-8">Confirm Sale</button></div></>)}
+            {paymentMethod === 'Debt' && (
+              <div className="border rounded-lg p-4 bg-amber-50 border-amber-200 space-y-3">
+                <div className="flex items-center gap-2 text-amber-800">
+                  <Users className="w-5 h-5 flex-shrink-0 text-amber-600" />
+                  <div>
+                    <p className="font-bold text-sm">Debt / Credit Sale</p>
+                    <p className="text-xs opacity-80">Items will be recorded as a debt. Select the customer who will owe this amount.</p>
+                  </div>
+                </div>
+                <div>
+                  <label className="text-sm font-medium text-amber-900 block mb-1">Select Customer <span className="text-red-500">*</span></label>
+                  <div className="relative">
+                    <input
+                      type="text"
+                      placeholder="Search customer by name or phone..."
+                      value={debtCustomerSearch}
+                      onChange={e => { setDebtCustomerSearch(e.target.value); setDebtCustomerId(''); }}
+                      className="input-field border-amber-300 focus:border-amber-500 focus:ring-amber-200"
+                    />
+                    {debtCustomerSearch && !debtCustomerId && (
+                      <div className="absolute z-10 w-full bg-white border border-amber-200 rounded-lg mt-1 max-h-40 overflow-auto shadow-lg">
+                        {(customers || []).filter(c =>
+                          (c.name || '').toLowerCase().includes(String(debtCustomerSearch || '').toLowerCase()) ||
+                          String(c.phone || '').includes(debtCustomerSearch)
+                        ).length > 0 ? (
+                          (customers || []).filter(c =>
+                            (c.name || '').toLowerCase().includes(String(debtCustomerSearch || '').toLowerCase()) ||
+                            String(c.phone || '').includes(debtCustomerSearch)
+                          ).map(c => (
+                            <div key={c.id} onClick={() => { setDebtCustomerId(c.id); setDebtCustomerSearch(`${c.name} - ${c.phone}`); }} className="p-2 hover:bg-amber-50 cursor-pointer text-sm">
+                              <span className="font-medium text-slate-800">{c.name}</span>
+                              <span className="text-slate-400 ml-2 text-xs">{c.phone}</span>
+                            </div>
+                          ))
+                        ) : (
+                          <div className="p-3 text-sm text-slate-400 text-center">No customers found. Add customers in the Customers section.</div>
+                        )}
+                      </div>
+                    )}
+                  </div>
+                  {debtCustomerId && (
+                    <div className="mt-2 flex items-center gap-2 text-sm text-amber-800 bg-amber-100 px-3 py-2 rounded-lg">
+                      <CheckCircle className="w-4 h-4 text-amber-600 flex-shrink-0" />
+                      <span>Customer selected: <strong>{customers.find(c => c.id === debtCustomerId)?.name}</strong></span>
+                      <button onClick={() => { setDebtCustomerId(''); setDebtCustomerSearch(''); }} className="ml-auto text-amber-600 hover:text-amber-800"><X className="w-4 h-4" /></button>
+                    </div>
+                  )}
+                </div>
+                <div className="flex justify-between font-bold text-sm pt-2 border-t border-amber-200">
+                  <span className="text-amber-900">Debt Amount:</span>
+                  <span className="text-red-600">Ksh. {totals.grandTotal.toLocaleString()}</span>
+                </div>
+              </div>
+            )}
+            {paymentMethod === 'M-Pesa' && (
+              <div className="border rounded-lg p-4 bg-slate-50 space-y-3">
+                {mpesaStatus === 'matched' ? (
+                  <div className="flex items-start gap-3 bg-emerald-50 border border-emerald-200 p-4 rounded-lg text-emerald-800">
+                    <CheckCircle className="w-8 h-8 flex-shrink-0 text-emerald-600" />
+                    <div className="w-full">
+                      <p className="font-bold text-lg">Payment Confirmed!</p>
+                      <p className="text-sm">From: <span className="font-semibold">{mpesaSender}</span></p>
+                      <p className="text-xs opacity-90 mb-2">Ref: {mpesaTxCode}</p>
+                      {mpesaAmount > totals.grandTotal && (
+                        <div className="mt-2 pt-2 border-t border-emerald-200">
+                          <p className="text-sm font-semibold text-red-600 mb-1">Overcharge detected! You cannot proceed until the customer adds more items.</p>
+                          <p className="text-sm font-semibold">Change / Overpayment: Ksh {(mpesaAmount - totals.grandTotal).toLocaleString()}</p>
+                          <button onClick={() => { setGlobalMpesa({ txCode: mpesaTxCode, sender: mpesaSender, amount: mpesaAmount, id: mpesaTxId }); onKeepShopping(); }} className="mt-2 text-xs bg-white text-emerald-700 border border-emerald-300 hover:bg-emerald-100 px-3 py-1.5 rounded font-medium transition-colors w-full sm:w-auto">Add more products to cart</button>
+                        </div>
+                      )}
+                      {mpesaAmount < totals.grandTotal && (
+                        <div className="mt-3 pt-3 border-t border-emerald-200">
+                          <p className="text-sm font-bold text-amber-600 mb-2">Undercharge: M-Pesa is short by Ksh {(totals.grandTotal - mpesaAmount).toLocaleString()}</p>
+                          <label className="text-sm font-medium text-slate-600">Add Cash to complete payment</label>
+                          <input type="number" value={splitCashGiven} onChange={e => setSplitCashGiven(parseFloat(e.target.value) || 0)} className="input-field mt-1" />
+                          <div className="flex gap-1 mt-2">
+                            <button onClick={() => setSplitCashGiven(100)} className="flex-1 bg-white hover:bg-emerald-100 text-slate-600 py-1 rounded text-xs border border-emerald-200 transition-colors">100</button>
+                            <button onClick={() => setSplitCashGiven(200)} className="flex-1 bg-white hover:bg-emerald-100 text-slate-600 py-1 rounded text-xs border border-emerald-200 transition-colors">200</button>
+                            <button onClick={() => setSplitCashGiven(500)} className="flex-1 bg-white hover:bg-emerald-100 text-slate-600 py-1 rounded text-xs border border-emerald-200 transition-colors">500</button>
+                            <button onClick={() => setSplitCashGiven(1000)} className="flex-1 bg-white hover:bg-emerald-100 text-slate-600 py-1 rounded text-xs border border-emerald-200 transition-colors">1000</button>
+                          </div>
+                          {(mpesaAmount + splitCashGiven) >= totals.grandTotal && (
+                             <div className="mt-2 pt-2 border-t border-emerald-200 flex justify-between font-bold text-sm">
+                               <span className="text-slate-700">Change Due:</span>
+                               <span className="text-blue-600">Ksh {((mpesaAmount + splitCashGiven) - totals.grandTotal).toLocaleString()}</span>
+                             </div>
+                          )}
+                        </div>
+                      )}
+                    </div>
+                  </div>
+                ) : mpesaStatus === 'manual' ? (
+                  <div className="space-y-2">
+                    <label className="text-sm font-medium text-slate-600">M-Pesa Confirmation Code</label>
+                    <input id="field-mpesa-manual" name="field-mpesa-manual" type="text" value={mpesaManualCode} onChange={e => setMpesaManualCode(e.target.value.toUpperCase())} className="input-field" placeholder="e.g. QAB1C2D3E4" />
+                    {mpesaListeningEnabled && <button onClick={() => setMpesaStatus('waiting')} className="text-xs text-slate-500 hover:underline">← Back to auto-detect</button>}
+                  </div>
+                ) : mpesaStatus === 'waiting' ? (
+                  <div className="space-y-3">
+                    <div className="flex items-center gap-3">
+                      <Loader2 className="w-5 h-5 text-emerald-600 animate-spin flex-shrink-0" />
+                      <div className="flex-1">
+                        <p className="text-sm font-medium text-slate-700">Waiting for M-Pesa payment of Ksh. {totals.grandTotal.toLocaleString()}...</p>
+                        <p className="text-xs text-slate-500">Listening for payments. Select one below when it arrives.</p>
+                      </div>
+                    </div>
+                    {availableMpesaTx.length > 0 && (
+                      <div className="mt-3 space-y-2 max-h-48 overflow-y-auto pr-1">
+                        <p className="text-xs font-semibold text-slate-500 uppercase">Available Payments:</p>
+                        {availableMpesaTx.map(tx => (
+                          <div key={tx.id} className="flex justify-between items-center bg-white border p-3 rounded-lg shadow-sm hover:border-emerald-300 transition-colors">
+                            <div>
+                              <p className="font-semibold text-sm text-slate-800">{tx.sender}</p>
+                              <p className="text-emerald-600 font-bold text-sm">Ksh. {Number(tx.amount).toLocaleString()}</p>
+                              <p className="text-xs text-slate-400">Ref: {tx.transaction_code}</p>
+                            </div>
+                            <div className="flex items-center gap-2">
+                              <button 
+                                onClick={() => {
+                                  if (window.confirm("Remove this payment from the list forever?")) {
+                                    const CONSUMED_KEY = 'sb_consumed_mpesa_tx';
+                                    let list = [];
+                                    try { list = JSON.parse(localStorage.getItem(CONSUMED_KEY)) || []; } catch {}
+                                    list.push(tx.id);
+                                    localStorage.setItem(CONSUMED_KEY, JSON.stringify(list.slice(-100)));
+                                    setAvailableMpesaTx(prev => prev.filter(t => t.id !== tx.id));
+                                  }
+                                }}
+                                className="text-red-400 hover:text-red-600 hover:bg-red-50 p-2 rounded-lg transition-colors"
+                                title="Delete Payment"
+                              >
+                                <Trash2 className="w-5 h-5" />
+                              </button>
+                              <button 
+                                onClick={() => {
+                                  setMpesaTxId(tx.id);
+                                  setMpesaTxCode(tx.transaction_code);
+                                  setMpesaSender(tx.sender);
+                                  setMpesaAmount(Number(tx.amount));
+                                  setMpesaStatus('matched');
+                                }}
+                                className="bg-emerald-100 text-emerald-700 hover:bg-emerald-600 hover:text-white px-4 py-2 rounded-lg text-sm font-bold transition-colors"
+                              >
+                                Assign
+                              </button>
+                            </div>
+                          </div>
+                        ))}
+                      </div>
+                    )}
+                  </div>
+                ) : (
+                  <div className="text-sm font-medium text-emerald-700 py-1">
+                    Auto-Listener is disabled. Click Confirm Sale below.
+                  </div>
+                )}
+                {mpesaListeningEnabled && mpesaStatus !== 'matched' && mpesaStatus !== 'manual' && (
+                  <button onClick={() => setMpesaStatus('manual')} className="text-xs text-slate-500 hover:underline mt-2">Enter confirmation code manually instead</button>
+                )}
+              </div>
+            )}
+            <div className="pt-4 border-t mt-4 space-y-3">
+              <h4 className="text-sm font-semibold text-slate-700">Customer Details (Optional)</h4>
+                <div className="relative">
+                  <input id="field-18" name="field-18" type="text" value={customerSearch} onChange={e => setCustomerSearch(e.target.value)} className="input-field" placeholder="Search existing customer..." />
+                  {filteredCustomers.length > 0 && (
+                    <div className="absolute z-10 w-full bg-white border rounded-lg mt-1 max-h-32 overflow-auto shadow-lg">
+                      {filteredCustomers.map(c => <div key={c.id} onClick={() => handleSelectCustomer(c)} className="p-2 hover:bg-emerald-50 cursor-pointer text-sm">{c.name} - {c.phone}</div>)}
+                    </div>
+                  )}
+                </div>
+                <div className="grid grid-cols-2 gap-4">
+                  <input id="field-19" name="field-19" type="text" value={customerName} onChange={e => setCustomerName(e.target.value)} className="input-field" placeholder="Customer Name" />
+                  <input id="field-20" name="field-20" type="text" value={customerPhone} onChange={e => setCustomerPhone(e.target.value)} className="input-field" placeholder="Phone e.g. +2547..." />
+                </div>
+              </div>
+            <div className="p-4 bg-slate-50 border-t flex justify-end items-center">
+              <button
+                onClick={() => handleConfirm(paymentMethod === 'M-Pesa' ? (mpesaStatus === 'manual' ? mpesaManualCode : mpesaTxCode) : (paymentMethod === 'Debt' ? debtCustomerId : null))}
+                disabled={(paymentMethod === 'M-Pesa' && (mpesaStatus === 'waiting' || (mpesaStatus === 'matched' && mpesaAmount > totals.grandTotal) || (mpesaStatus === 'matched' && mpesaAmount < totals.grandTotal && (mpesaAmount + splitCashGiven) < totals.grandTotal) || (mpesaStatus === 'manual' && !mpesaManualCode.trim()))) || (paymentMethod === 'Debt' && !debtCustomerId)}
+                className="btn-primary py-3 px-8 ml-auto disabled:bg-slate-300 disabled:shadow-none disabled:cursor-not-allowed"
+              >
+                {paymentMethod === 'M-Pesa' && mpesaStatus === 'waiting' ? 'Waiting for Payment...' : paymentMethod === 'M-Pesa' && mpesaStatus === 'manual' && !mpesaManualCode.trim() ? 'Enter M-Pesa Code...' : paymentMethod === 'Debt' ? 'Record Debt & Confirm' : 'Confirm Sale'}
+              </button>
+            </div>
+          </>
+        )}
       </div></div>);
     };
 
@@ -1381,7 +1937,7 @@ import React, { useState, useEffect, useRef, useMemo, useCallback } from 'react'
                 <table className="w-full text-left text-sm"><thead className="bg-slate-50"><tr><th className="p-2">Product</th><th className="p-2">Current</th><th className="p-2">New</th><th className="p-2">Diff</th></tr></thead>
                 <tbody>
                   {previewData.slice(0, 100).map(p => (
-                    <tr key={(p && p.id)} className="border-b"><td className="p-2">{p.name}</td><td className="p-2 text-slate-500">{(Number() || 0).toFixed(2)}</td><td className="p-2 font-bold text-emerald-600">{(Number() || 0).toFixed(2)}</td><td className="p-2 text-xs">{(Number(p.newPrice - p.price) || 0).toFixed(2)}</td></tr>
+                    <tr key={(p && p.id)} className="border-b"><td className="p-2">{p.name}</td><td className="p-2 text-slate-500">{(Number(p.price) || 0).toFixed(2)}</td><td className="p-2 font-bold text-emerald-600">{(Number(p.newPrice) || 0).toFixed(2)}</td><td className="p-2 text-xs">{(Number(p.newPrice - p.price) || 0).toFixed(2)}</td></tr>
                   ))}
                   {previewData.length > 100 && <tr><td colSpan="4" className="p-2 text-center text-slate-400">...and {previewData.length - 100} more</td></tr>}
                 </tbody></table>
@@ -1456,8 +2012,27 @@ import React, { useState, useEffect, useRef, useMemo, useCallback } from 'react'
       );
     };
 
-    const ProductPanel = ({ settings, superAdminSettings, products, setProducts, currentUser, processSale, printData, suppliers, customers, updateCustomers, stockHistory, setStockHistory, cart, setCart }) => {
-      const [search, setSearch] = useState(''); const [cat, setCat] = useState(''); const [scannerMode, setScannerMode] = useState(null); const [showImport, setShowImport] = useState(false); const [updateId, setUpdateId] = useState(null); const [form, setForm] = useState({ name: '', price: '', cost: '', stock: '', cat: '', code: '', isCommodity: false, unit: 'Kg', expiryDate: '' }); const [showBulkPriceUpdate, setShowBulkPriceUpdate] = useState(false); const [activeTab, setActiveTab] = useState('all'); const [editId, setEditId] = useState(null); const [editData, setEditData] = useState({}); const [isCheckingOut, setIsCheckingOut] = useState(false); const [showOrderModal, setShowOrderModal] = useState(false); const [showShoppingListModal, setShowShoppingListModal] = useState(false); const [shoppingListItems, setShoppingListItems] = useState([]); const [printShoppingListNow, setPrintShoppingListNow] = useState(false); const [selectedOrderItems, setSelectedOrderItems] = useState([]); const [initialSupplierId, setInitialSupplierId] = useState(null); const [showAttractMode, setShowAttractMode] = useState(false); const [showAddProduct, setShowAddProduct] = useState(false); const role = currentUser?.role; const perms = currentUser?.permissions || {};
+    const ProductPanel = ({ settings, superAdminSettings, products, setProducts, currentUser, processSale, printData, suppliers, customers, updateCustomers, stockHistory, setStockHistory, cart, setCart, debts, setDebts: updateDebts }) => {
+      const [search, setSearch] = useState(''); const [cat, setCat] = useState(''); const [scannerMode, setScannerMode] = useState(null); const [desktopScannerMode, setDesktopScannerMode] = useState('sell'); const [showImport, setShowImport] = useState(false); const [updateId, setUpdateId] = useState(null); const [form, setForm] = useState({ name: '', price: '', cost: '', stock: '', cat: '', code: '', isCommodity: false, unit: 'Kg', expiryDate: '' }); const [showBulkPriceUpdate, setShowBulkPriceUpdate] = useState(false); const [activeTab, setActiveTab] = useState('all'); const [editId, setEditId] = useState(null); const [editData, setEditData] = useState({}); const [isCheckingOut, setIsCheckingOut] = useState(false); const [showOrderModal, setShowOrderModal] = useState(false); const [showShoppingListModal, setShowShoppingListModal] = useState(false); const [shoppingListItems, setShoppingListItems] = useState([]); const [printShoppingListNow, setPrintShoppingListNow] = useState(false); const [selectedOrderItems, setSelectedOrderItems] = useState([]); const [initialSupplierId, setInitialSupplierId] = useState(null); const [showAttractMode, setShowAttractMode] = useState(false); const [showAddProduct, setShowAddProduct] = useState(false); const [addMode, setAddMode] = useState('manual'); const role = currentUser?.role; const perms = currentUser?.permissions || {};
+
+        const [globalMpesa, setGlobalMpesa] = useState(null);
+
+        // Auto-checkout effect when cart grand total hits globalMpesa
+        useEffect(() => {
+          if (globalMpesa && !isCheckingOut) {
+             let subtotal = 0, totalDiscount = 0; 
+             cart.forEach(item => { 
+               const itemTotal = item.price * item.quantity; 
+               subtotal += itemTotal; 
+               totalDiscount += item.discountType === 'percent' ? itemTotal * (item.discountValue / 100) : item.discountValue; 
+             });
+             const grandTotal = subtotal - totalDiscount;
+             if (grandTotal === globalMpesa.amount && grandTotal > 0) {
+               setIsCheckingOut(true);
+             }
+          }
+        }, [cart, globalMpesa, isCheckingOut]);
+
 
       // Voice Assistant States and Logic
       const [isListening, setIsListening] = useState(false);
@@ -1903,6 +2478,22 @@ import React, { useState, useEffect, useRef, useMemo, useCallback } from 'react'
       };
       function addStock(p, q) { const updated = products.map(x => x.id === (p && p.id) ? { ...x, stock: x.stock + q } : x); setProducts(updated); setStockHistory([...stockHistory, { name: p.name, qty: q, action: 'Added', barcode: p.barcode, date: new Date().toISOString(), cashierName: currentUser?.name }]); toast.success(`+${q} Stock: ${p.name}`, { duration: 1500 }); };
       const handleScan = (code) => { 
+        if (scannerMode === 'catalog_add') {
+           setScannerMode(null);
+           const found = superAdminSettings.masterCatalog?.find(c => String(c.barcode) === code);
+           if (found) {
+              if (products.some(p => p.barcode === code)) {
+                 toast.error(`${found.name || 'Product'} is already in your shop!`);
+              } else {
+                 const newProduct = { id: crypto.randomUUID(), name: found.name || 'Unknown', price: parseFloat(found.price) || 0, cost: parseFloat(found.cost) || 0, stock: 0, category: found.category || found.cat || '', barcode: code, isCommodity: false, unit: 'Kg', dateAdded: new Date().toISOString(), cashierName: currentUser?.name || 'Unknown', timestamp: new Date().toISOString() };
+                 setProducts(prev => [...prev, newProduct]);
+                 toast.success(`${newProduct.name} added from Master Catalog!`);
+              }
+           } else {
+              toast.error("Barcode not found in Master Catalog.");
+           }
+           return;
+        }
         const p = products.find(x => x.barcode === code || (x.savedQRCodes && x.savedQRCodes.some(qr => qr.id === code))); 
         if (scannerMode === 'sell') { if (!p) { toast.error('Product not found', { duration: 1500 }); return; } addToCart(p); setScannerMode(null); return; } 
         if (scannerMode === 'stock') { if (!p) { toast.error('Product not found', { duration: 1500 }); return; } setScannerMode(null); const q = prompt(`Add Stock for "${p.name}":`, '1'); if (q !== null) { const n = parseFloat(q); if (!isNaN(n) && n > 0) addStock(p, n); else toast.error('Invalid quantity'); } return; } 
@@ -1945,6 +2536,9 @@ import React, { useState, useEffect, useRef, useMemo, useCallback } from 'react'
 
       useEffect(() => {
         const handleGlobalScan = (e) => {
+          // When in catalog scan mode (external scanner), the dedicated input handles it — do NOT interfere
+          if (addMode === 'catalog' && showAddProduct) return;
+
           // Must look for digits on the barcode and typing speed should be very fast (scanner)
           if (/^\d$/.test(e.key)) {
             const now = Date.now();
@@ -1966,7 +2560,20 @@ import React, { useState, useEffect, useRef, useMemo, useCallback } from 'react'
               barcodeBuffer.current.text = '';
               const p = products.find(x => x.barcode === code);
               if (p) {
-                addToCart(p);
+                if (settings.desktopMode) {
+                  if (desktopScannerMode === 'stock') {
+                    const q = prompt(`Add Stock for "${p.name}":`, '1');
+                    if (q !== null) {
+                      const n = parseFloat(q);
+                      if (!isNaN(n) && n > 0) addStock(p, n);
+                      else toast.error('Invalid quantity');
+                    }
+                  } else if (desktopScannerMode === 'sell') {
+                    addToCart(p);
+                  }
+                } else {
+                  addToCart(p);
+                }
                 lastScanTime.current = Date.now();
                 e.preventDefault();
               }
@@ -1978,7 +2585,7 @@ import React, { useState, useEffect, useRef, useMemo, useCallback } from 'react'
         };
         window.addEventListener('keydown', handleGlobalScan);
         return () => window.removeEventListener('keydown', handleGlobalScan);
-      }, [products, addToCart]); 
+      }, [products, addToCart, settings.desktopMode, desktopScannerMode, addMode, showAddProduct]); 
 
 
 
@@ -1994,13 +2601,102 @@ import React, { useState, useEffect, useRef, useMemo, useCallback } from 'react'
             <button onClick={(e) => { e.stopPropagation(); setShowAttractMode(true) }} className="btn-primary bg-purple-600 hover:bg-purple-700 px-4 py-2"><Play className="w-4 h-4" /> Attract Mode</button>
             <button onClick={() => setShowImport(true)} className="btn-primary px-4 py-2"><FileText className="w-4 h-4" /> Import List</button>
             {(role === 'owner' || perms.bulkPriceUpdate) && <button onClick={() => setShowBulkPriceUpdate(true)} className="btn-primary bg-blue-600 hover:bg-blue-700 px-4 py-2"><Edit2 className="w-4 h-4" /> Bulk Update</button>}
-            {settings.showScan && (<><button onClick={() => setScannerMode('stock')} className="btn-primary px-4 py-2"><PackagePlus className="w-4 h-4" /> Scan to Stock</button>{settings.showScanToSell && <button onClick={() => setScannerMode('sell')} className="btn-primary px-4 py-2"><Scan className="w-4 h-4" /> Scan to Sell</button>}</>)}
+            {settings.showScan && (
+              settings.desktopMode ? (
+                <>
+                  <button onClick={() => setDesktopScannerMode(m => m === 'stock' ? 'none' : 'stock')} className={`px-4 py-2 text-sm font-medium flex items-center justify-center gap-2 rounded-lg transition-colors w-[150px] ${desktopScannerMode === 'stock' ? 'bg-amber-500 text-white shadow-inner' : 'bg-slate-100 text-slate-700 hover:bg-slate-200'}`}><PackagePlus className="w-4 h-4" /> {desktopScannerMode === 'stock' ? 'Stocking: ON' : 'Scan to Stock: OFF'}</button>
+                  {settings.showScanToSell && <button onClick={() => setDesktopScannerMode(m => m === 'sell' ? 'none' : 'sell')} className={`px-4 py-2 text-sm font-medium flex items-center justify-center gap-2 rounded-lg transition-colors w-[140px] ${desktopScannerMode === 'sell' ? 'bg-emerald-600 text-white shadow-inner' : 'bg-slate-100 text-slate-700 hover:bg-slate-200'}`}><Scan className="w-4 h-4" /> {desktopScannerMode === 'sell' ? 'Selling: ON' : 'Scan to Sell: OFF'}</button>}
+                </>
+              ) : (
+                <>
+                  <button onClick={() => setScannerMode('stock')} className="btn-primary px-4 py-2 w-[150px]"><PackagePlus className="w-4 h-4" /> Scan to Stock</button>
+                  {settings.showScanToSell && <button onClick={() => setScannerMode('sell')} className="btn-primary px-4 py-2 w-[140px]"><Scan className="w-4 h-4" /> Scan to Sell</button>}
+                </>
+              )
+            )}
           </div>
         </div>
 
         <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
           <div className="lg:col-span-2 space-y-6">
-            {(role === 'owner' || perms.editProducts) && showAddProduct && (<div className="card grid md:grid-cols-2 lg:grid-cols-4 gap-4"><div className="col-span-full font-semibold text-slate-700">Add New Product</div><div className="lg:col-span-2"><input id="field-25" name="field-25" className="input-field" placeholder="Product Name" value={form.name} onChange={e => setForm({ ...form, name: e.target.value })} /></div><div><input id="field-26" name="field-26" className="input-field" type="number" placeholder={form.isCommodity ? `Price per ${form.unit}` : "Price"} value={form.price} onChange={e => setForm({ ...form, price: e.target.value })} /></div>{settings.showCosts && <div><input id="field-27" name="field-27" className="input-field" type="number" placeholder={form.isCommodity ? `Cost per ${form.unit}` : "Cost"} value={form.cost} onChange={e => setForm({ ...form, cost: e.target.value })} /></div>}<div><input id="field-28" name="field-28" className="input-field" type="number" placeholder={form.isCommodity ? `Stock (${form.unit})` : "Stock"} value={form.stock} onChange={e => setForm({ ...form, stock: e.target.value })} /></div>{settings.trackExpiry !== false && <div><label className="text-xs text-slate-500 font-medium block mb-1">Expiry Date</label><input id="field-29" name="field-29" type="month" className="input-field" value={form.expiryDate} onChange={e => setForm({ ...form, expiryDate: e.target.value })} /></div>}<div><input id="field-30" name="field-30" className="input-field" list="category-list" placeholder="Category" value={form.cat} onChange={e => setForm({ ...form, cat: e.target.value })} /><datalist id="category-list">{cats.map(c => <option key={c} value={c} />)}</datalist></div><div className="col-span-full lg:col-span-2"><div className="relative flex-1 flex gap-2"><div className="relative flex-1"><input id="field-31" name="field-31" className="input-field pr-8" placeholder="Barcode (Optional)" value={form.code} onChange={e => setForm({ ...form, code: e.target.value })} />{settings.showScan && <button onClick={() => setScannerMode('fill')} className="absolute right-2 top-2.5 text-slate-400 hover:text-emerald-600"><Scan className="w-4 h-4" /></button>}</div><button onClick={(e) => { e.preventDefault(); let newBarcode; let exists = true; const letters = "ABCDEFGHIJKLMNOPQRSTUVWXYZ"; const numbers = "0123456789"; while (exists) { newBarcode = ""; for (let i = 0; i < 6; i++) newBarcode += numbers.charAt(Math.floor(Math.random() * numbers.length)); exists = products.some(p => p.barcode === newBarcode); } setForm({...form, code: newBarcode}); }} className="bg-indigo-100 text-indigo-700 px-4 rounded-lg text-sm font-semibold hover:bg-indigo-200 shrink-0">Generate</button></div></div><div className="col-span-full flex justify-between items-center mt-2"><div className="flex items-center gap-4"><div className="flex items-center gap-2"><input type="checkbox" id="isCommodityAdd" checked={form.isCommodity} onChange={e => setForm({ ...form, isCommodity: e.target.checked })} className="w-4 h-4 text-emerald-600 bg-gray-100 border-gray-300 rounded focus:ring-emerald-500" /><label htmlFor="isCommodityAdd" className="text-sm font-medium text-slate-700">Commodity</label></div>{form.isCommodity && (<select value={form.unit} onChange={e => setForm({ ...form, unit: e.target.value })} className="input-field py-1 text-sm w-24"><option value="Kg">Kg</option><option value="L">L</option></select>)}</div><button onClick={addProd} className="btn-primary px-6"><Plus className="w-4 h-4" /> Add</button></div></div>)}
+            {(role === 'owner' || perms.editProducts) && showAddProduct && (
+              <div className="card space-y-4">
+                <div className="font-semibold text-slate-700">Add New Product</div>
+                
+                {superAdminSettings?.enableMasterCatalogScan && superAdminSettings?.masterCatalog?.length > 0 && (
+                  <div className="flex gap-4 border-b pb-4">
+                    <button onClick={() => setAddMode('catalog')} className={`flex-1 py-2 rounded-lg font-medium transition-colors ${addMode === 'catalog' ? 'bg-emerald-100 text-emerald-700 border-2 border-emerald-500 shadow-sm' : 'bg-slate-50 text-slate-600 hover:bg-slate-100 border-2 border-transparent'}`}>Scan from Master Catalog</button>
+                    <button onClick={() => setAddMode('manual')} className={`flex-1 py-2 rounded-lg font-medium transition-colors ${addMode === 'manual' ? 'bg-emerald-100 text-emerald-700 border-2 border-emerald-500 shadow-sm' : 'bg-slate-50 text-slate-600 hover:bg-slate-100 border-2 border-transparent'}`}>Add Manually</button>
+                  </div>
+                )}
+                
+                {addMode === 'catalog' && superAdminSettings?.enableMasterCatalogScan ? (
+                  <div className="text-center p-8 bg-emerald-50 rounded-xl border border-emerald-200">
+                    <Scan className="w-12 h-12 text-emerald-500 mx-auto mb-4" />
+                    <h3 className="text-lg font-bold text-emerald-800">Scan Barcode Now</h3>
+                    {superAdminSettings?.masterCatalogScanMethod === 'camera' ? (
+                      <div className="mt-4">
+                        <p className="text-emerald-600 text-sm max-w-md mx-auto mb-4">Click below to open your device camera and scan a barcode from the Master Catalog.</p>
+                        <button onClick={(e) => { e.preventDefault(); setScannerMode('catalog_add'); }} className="btn-primary bg-emerald-600 hover:bg-emerald-700 px-6 py-3 rounded-lg"><Scan className="w-5 h-5 mr-2 inline" /> Open Camera to Scan</button>
+                      </div>
+                    ) : (
+                      <>
+                        <p className="text-emerald-600 text-sm mt-2 max-w-md mx-auto mb-4">Point your external barcode scanner at a product. It will be found in the master catalog and added instantly.</p>
+                        <div className="relative max-w-xs mx-auto">
+                          <input
+                            autoFocus
+                            type="text"
+                            id="catalog-scan-input"
+                            placeholder="Scanning... (aim scanner here)"
+                            className="input-field text-center font-mono tracking-widest border-2 border-emerald-400 focus:ring-2 focus:ring-emerald-500 bg-white"
+                            onKeyDown={e => {
+                              if (e.key === 'Enter') {
+                                const code = e.target.value.trim();
+                                if (code) {
+                                   const catalog = superAdminSettings.masterCatalog || [];
+                                   const found = catalog.find(c => String(c.barcode).trim() === code);
+                                   if (found) {
+                                      if (products.some(p => String(p.barcode).trim() === code)) {
+                                         toast.error(`${found.name || 'Product'} is already in your shop!`);
+                                      } else {
+                                         const newProduct = {
+                                            id: crypto.randomUUID(),
+                                            name: found.name || 'Unknown',
+                                            price: parseFloat(found.price) || 0,
+                                            cost: parseFloat(found.cost) || 0,
+                                            stock: 0,
+                                            category: found.category || found.cat || '',
+                                            barcode: code,
+                                            isCommodity: false,
+                                            unit: 'Kg',
+                                            sold: 0,
+                                            profit: 0,
+                                            dateAdded: new Date().toISOString(),
+                                            cashierName: currentUser?.name || 'Unknown',
+                                            timestamp: new Date().toISOString()
+                                         };
+                                         setProducts(prev => [...prev, newProduct]);
+                                         toast.success(`✓ ${newProduct.name} added!`);
+                                      }
+                                   } else {
+                                      toast.error(`Barcode "${code}" not found in Master Catalog.`);
+                                   }
+                                   e.target.value = '';
+                                }
+                                e.preventDefault();
+                              }
+                            }}
+                          />
+                        </div>
+                        <p className="text-xs text-slate-400 mt-3">Click inside the box above, then scan</p>
+                      </>
+                    )}
+                  </div>
+                ) : (
+                  <div className="grid md:grid-cols-2 lg:grid-cols-4 gap-4"><div className="lg:col-span-2"><input id="field-25" name="field-25" className="input-field" placeholder="Product Name" value={form.name} onChange={e => setForm({ ...form, name: e.target.value })} /></div><div><input id="field-26" name="field-26" className="input-field" type="number" placeholder={form.isCommodity ? `Price per ${form.unit}` : "Price"} value={form.price} onChange={e => setForm({ ...form, price: e.target.value })} /></div>{settings.showCosts && <div><input id="field-27" name="field-27" className="input-field" type="number" placeholder={form.isCommodity ? `Cost per ${form.unit}` : "Cost"} value={form.cost} onChange={e => setForm({ ...form, cost: e.target.value })} /></div>}<div><input id="field-28" name="field-28" className="input-field" type="number" placeholder={form.isCommodity ? `Stock (${form.unit})` : "Stock"} value={form.stock} onChange={e => setForm({ ...form, stock: e.target.value })} /></div>{settings.trackExpiry !== false && <div><label className="text-xs text-slate-500 font-medium block mb-1">Expiry Date</label><input id="field-29" name="field-29" type="month" className="input-field" value={form.expiryDate} onChange={e => setForm({ ...form, expiryDate: e.target.value })} /></div>}<div><input id="field-30" name="field-30" className="input-field" list="category-list" placeholder="Category" value={form.cat} onChange={e => setForm({ ...form, cat: e.target.value })} /><datalist id="category-list">{cats.map(c => <option key={c} value={c} />)}</datalist></div><div className="col-span-full lg:col-span-2"><div className="relative flex-1 flex gap-2"><div className="relative flex-1"><input id="field-31" name="field-31" className="input-field pr-8" placeholder="Barcode (Optional)" value={form.code} onChange={e => setForm({ ...form, code: e.target.value })} />{settings.showScan && <button onClick={() => setScannerMode('fill')} className="absolute right-2 top-2.5 text-slate-400 hover:text-emerald-600"><Scan className="w-4 h-4" /></button>}</div><button onClick={(e) => { e.preventDefault(); let newBarcode; let exists = true; const letters = "ABCDEFGHIJKLMNOPQRSTUVWXYZ"; const numbers = "0123456789"; while (exists) { newBarcode = ""; for (let i = 0; i < 6; i++) newBarcode += numbers.charAt(Math.floor(Math.random() * numbers.length)); exists = products.some(p => p.barcode === newBarcode); } setForm({...form, code: newBarcode}); }} className="bg-indigo-100 text-indigo-700 px-4 rounded-lg text-sm font-semibold hover:bg-indigo-200 shrink-0">Generate</button></div></div><div className="col-span-full flex justify-between items-center mt-2"><div className="flex items-center gap-4"><div className="flex items-center gap-2"><input type="checkbox" id="isCommodityAdd" checked={form.isCommodity} onChange={e => setForm({ ...form, isCommodity: e.target.checked })} className="w-4 h-4 text-emerald-600 bg-gray-100 border-gray-300 rounded focus:ring-emerald-500" /><label htmlFor="isCommodityAdd" className="text-sm font-medium text-slate-700">Commodity</label></div>{form.isCommodity && (<select value={form.unit} onChange={e => setForm({ ...form, unit: e.target.value })} className="input-field py-1 text-sm w-24"><option value="Kg">Kg</option><option value="L">L</option></select>)}</div><button onClick={addProd} className="btn-primary px-6"><Plus className="w-4 h-4" /> Add</button></div></div>
+                )}
+              </div>
+            )}
             
             {role === 'owner' && <div className="flex gap-4 mb-4 border-b border-slate-200">
               <button onClick={() => setProdTab('manage')} className={`pb-3 px-2 font-semibold text-sm border-b-2 transition-colors ${prodTab === 'manage' ? 'border-emerald-600 text-emerald-600' : 'border-transparent text-slate-500 hover:text-slate-800'}`}>Manage Products</button>
@@ -2076,10 +2772,10 @@ import React, { useState, useEffect, useRef, useMemo, useCallback } from 'react'
           <div className="lg:col-span-1 sticky top-8 order-1 lg:order-2"><CartPanel cart={cart} onUpdate={updateCartItem} onRemove={removeCartItem} onClear={clearCart} onCheckout={() => setIsCheckingOut(true)} currentUser={currentUser} /></div>
         </div>
 
-        {scannerMode && <ScannerModal title={scannerMode === 'sell' ? 'Scan to Sell' : scannerMode === 'stock' ? 'Scan to Stock' : 'Scan Barcode'} onScan={handleScan} onClose={() => setScannerMode(null)} scannerSize={superAdminSettings?.scannerSize} />}
+        {scannerMode && <ScannerModal title={scannerMode === 'sell' ? 'Scan to Sell' : scannerMode === 'stock' ? 'Scan to Stock' : scannerMode === 'catalog_add' ? 'Scan from Master Catalog' : 'Scan Barcode'} onScan={handleScan} onClose={() => setScannerMode(null)} scannerSize={superAdminSettings?.scannerSize} />}
         {showImport && <TextImportModal existingProducts={products} onClose={() => setShowImport(false)} onImport={(items) => setProducts(mergeProducts([...products, ...items]))} settings={settings} />}
         {showBulkPriceUpdate && <BulkPriceUpdateModal products={products} setProducts={setProducts} onClose={() => setShowBulkPriceUpdate(false)} currentUser={currentUser} suppliers={suppliers} />}
-        {isCheckingOut && <CheckoutModal cart={cart} onConfirm={handleCheckout} onClose={() => { setIsCheckingOut(false); clearCart(); }} currentUser={currentUser} printData={printData} settings={settings} customers={customers} updateCustomers={updateCustomers} />}
+        {isCheckingOut && <ErrorBoundary><CheckoutModal cart={cart} onConfirm={handleCheckout} onClose={() => { setIsCheckingOut(false); clearCart(); setGlobalMpesa(null); }} onKeepShopping={() => setIsCheckingOut(false)} currentUser={currentUser} printData={printData} settings={settings} customers={customers} updateCustomers={updateCustomers} globalMpesa={globalMpesa} setGlobalMpesa={setGlobalMpesa} debts={debts} updateDebts={updateDebts} /></ErrorBoundary>}
         {showOrderModal && <OrderModal initialProducts={selectedOrderItems} suppliers={suppliers} shopName={settings.name} onClose={() => { setShowOrderModal(false); setSelectedIds(new Set()); }} initialSupplierId={initialSupplierId} />}
         {showAttractMode && <div className="fixed inset-0 z-[100] bg-black flex items-center justify-center cursor-pointer" onClick={(e) => { e.stopPropagation(); setShowAttractMode(false); }}><video src="animation.mp4" autoPlay loop muted playsInline className="w-full h-full object-cover" /></div>}
         
@@ -2175,7 +2871,7 @@ import React, { useState, useEffect, useRef, useMemo, useCallback } from 'react'
 </div>);
     };
 
-    const StockHistoryPanel = ({ stockHistory }) => {
+    const StockHistoryPanel = ({ stockHistory, setStockHistory, currentUser }) => {
       const [searchVal, setSearchVal] = useState('');
       const [dateRange, setDateRange] = useState({ start: '', end: '' });
       const [currentPage, setCurrentPage] = useState(1);
@@ -2183,26 +2879,79 @@ import React, { useState, useEffect, useRef, useMemo, useCallback } from 'react'
       useEffect(() => { setCurrentPage(1); }, [searchVal, dateRange]);
 
       const filteredStock = useMemo(() => {
-        return stockHistory.filter(s => {
+        return (stockHistory || []).filter(s => {
           const matchSearch = (s.name || '').toLowerCase().includes(searchVal.toLowerCase()) || s.cashierName?.toLowerCase().includes(searchVal.toLowerCase());
-          const dDate = new Date(s.date).toISOString().split('T')[0];
+          const dDate = s.date ? new Date(s.date).toISOString().split('T')[0] : '';
           const matchStart = !dateRange.start || dDate >= dateRange.start;
           const matchEnd = !dateRange.end || dDate <= dateRange.end;
           return matchSearch && matchStart && matchEnd;
         }).reverse();
       }, [stockHistory, searchVal, dateRange]);
 
+      const isOwner = currentUser?.role === 'owner';
+
+      const handleDeleteIndividual = (item) => {
+        if (confirm(`Delete this stock record of ${item.qty} ${item.name}?`)) {
+          setStockHistory(prev => prev.filter(s => s.date !== item.date || s.name !== item.name || s.qty !== item.qty));
+          toast.success('Record deleted');
+        }
+      };
+
+      const handleClearAll = () => {
+        if (confirm('Are you sure you want to delete all stock history? This action cannot be undone.')) {
+          setStockHistory([]);
+          toast.success('All stock history deleted');
+        }
+      };
+
       return (<div className="space-y-6 pb-20">
         <div className="flex flex-col sm:flex-row justify-between gap-4 items-start sm:items-center">
           <div><h2 className="text-2xl font-bold text-slate-800">Stock History</h2><p className="text-slate-500">Track inventory additions</p></div>
-          <div className="flex gap-2 flex-wrap">
+          <div className="flex gap-2 flex-wrap items-center">
             <div className="relative"><Search className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-slate-400" /><input id="field-43" name="field-43" value={searchVal} onChange={e => setSearchVal(e.target.value)} className="input-field py-1.5 pl-9 text-sm" placeholder="Search..." /></div>
             <input id="field-44" name="field-44" type="date" value={dateRange.start} onChange={e => setDateRange({ ...dateRange, start: e.target.value })} className="input-field py-1.5 text-sm" />
             <input id="field-45" name="field-45" type="date" value={dateRange.end} onChange={e => setDateRange({ ...dateRange, end: e.target.value })} className="input-field py-1.5 text-sm" />
+            {isOwner && (
+              <button onClick={handleClearAll} className="bg-red-50 text-red-600 border border-red-200 hover:bg-red-100 font-medium py-1.5 px-3 rounded-lg text-sm flex items-center gap-1.5 transition-colors">
+                <Trash2 className="w-4 h-4" /> Clear All
+              </button>
+            )}
           </div>
         </div>
         <div className="bg-white rounded-xl border border-slate-200 shadow-sm overflow-hidden">
-          <table className="w-full text-sm text-left"><thead className="bg-slate-50 text-slate-500 font-medium"><tr><th className="p-3">Date</th><th className="p-3">Product</th><th className="p-3">Added by</th><th className="p-3 text-right">Qty Added</th></tr></thead><tbody className="divide-y divide-slate-100">{filteredStock.slice((currentPage - 1) * 50, currentPage * 50).map((s, i) => <tr key={i} className="hover:bg-slate-50"><td className="p-3 text-slate-500">{new Date(s.date).toLocaleString()}</td><td className="p-3 font-medium text-slate-800">{s.name}</td><td className="p-3 text-slate-500">{s.cashierName}</td><td className="p-3 text-right font-bold text-blue-600">+{s.qty}</td></tr>)}</tbody></table>
+          <table className="w-full text-sm text-left">
+            <thead className="bg-slate-50 text-slate-500 font-medium">
+              <tr>
+                <th className="p-3">Date</th>
+                <th className="p-3">Product</th>
+                <th className="p-3">Added by</th>
+                <th className="p-3 text-right">Qty Added</th>
+                {isOwner && <th className="p-3 text-right">Action</th>}
+              </tr>
+            </thead>
+            <tbody className="divide-y divide-slate-100">
+              {filteredStock.slice((currentPage - 1) * 50, currentPage * 50).map((s, i) => (
+                <tr key={i} className="hover:bg-slate-50">
+                  <td className="p-3 text-slate-500">{s.date ? new Date(s.date).toLocaleString() : 'N/A'}</td>
+                  <td className="p-3 font-medium text-slate-800">{s.name}</td>
+                  <td className="p-3 text-slate-500">{s.cashierName || 'N/A'}</td>
+                  <td className="p-3 text-right font-bold text-blue-600">+{s.qty}</td>
+                  {isOwner && (
+                    <td className="p-3 text-right">
+                      <button onClick={() => handleDeleteIndividual(s)} className="p-1.5 text-red-500 hover:bg-red-50 rounded-lg transition-colors animate-all" title="Delete entry">
+                        <Trash2 className="w-4 h-4" />
+                      </button>
+                    </td>
+                  )}
+                </tr>
+              ))}
+              {filteredStock.length === 0 && (
+                <tr>
+                  <td colSpan={isOwner ? 5 : 4} className="p-8 text-center text-slate-400">No stock history found.</td>
+                </tr>
+              )}
+            </tbody>
+          </table>
           <Pagination totalItems={filteredStock.length} itemsPerPage={50} currentPage={currentPage} setCurrentPage={setCurrentPage} />
         </div>
       </div>);
@@ -2595,6 +3344,7 @@ import React, { useState, useEffect, useRef, useMemo, useCallback } from 'react'
           toast.error("No products to generate PDF.");
           return;
         }
+
         const today = new Date().toLocaleDateString('en-GB');
         doc.setFontSize(16);
         doc.text(settings.name || 'Products Sheet', 14, 15);
@@ -2651,8 +3401,43 @@ import React, { useState, useEffect, useRef, useMemo, useCallback } from 'react'
 
       // Removed generatePDF and handleDownloadPdf from here
 
+      const downloadImportListFormat = () => {
+        const trackExp = settings?.trackExpiry !== false;
+        let csvContent = "";
+        
+        products.forEach(p => {
+          const barcode = p.barcode || '';
+          const name = (p.name || '').replace(/,/g, '');
+          const price = p.price || 0;
+          const category = (p.category || 'General').replace(/,/g, '');
+          const cost = p.cost || 0;
+          const stock = p.stock || 0;
+          let row = `${barcode}, ${name}, ${price}, ${category}, ${cost}, ${stock}`;
+          if (trackExp) {
+            row += `, ${p.expiryDate || ''}`;
+          }
+          csvContent += row + "\n";
+        });
+
+        const blob = new Blob([csvContent], { type: 'text/csv;charset=utf-8;' });
+        const link = document.createElement("a");
+        const url = URL.createObjectURL(blob);
+        link.setAttribute("href", url);
+        link.setAttribute("download", `Products_Import_Format_${new Date().toISOString().split('T')[0]}.csv`);
+        link.style.visibility = 'hidden';
+        document.body.appendChild(link);
+        link.click();
+        document.body.removeChild(link);
+        toast.success("Products downloaded in import format!");
+      };
+
       return (<div className="space-y-6">
-        <h2 className="text-2xl font-bold text-slate-800">Business Analytics</h2>
+        <div className="flex justify-between items-center flex-wrap gap-4">
+          <h2 className="text-2xl font-bold text-slate-800">Business Analytics</h2>
+          <button onClick={downloadImportListFormat} className="btn-primary bg-emerald-600 hover:bg-emerald-700 text-white text-sm py-2 px-4 flex items-center gap-2 rounded-xl transition-all">
+            <Download className="w-4 h-4" /> Download Import List
+          </button>
+        </div>
         {showPdfReminder && (<div className="bg-amber-50 border-l-4 border-amber-400 p-4 rounded-r-lg mb-6 flex justify-between items-center shadow-sm"><div className="flex-1"><h4 className="font-bold text-amber-800">Daily Report Reminder</h4><p className="text-sm text-amber-700 mt-1">Don't forget to download your business report for your records.</p></div><button onClick={() => setShowPdfReminder(false)} className="p-1.5 text-amber-500 hover:bg-amber-100 rounded-full"><X className="w-5 h-5" /></button></div>)}
         <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 gap-4"><KPICard title="Total Revenue" val={revenue} icon={DollarSign} color="text-emerald-600" bg="bg-emerald-50" />{settings.showCosts && (currentUser?.role === 'owner' || !!currentUser?.permissions?.viewCostPrice) && <KPICard title="Net Profit" val={profit} icon={TrendingUp} color="text-blue-600" bg="bg-blue-50" />}<KPICard title="Total Expenses" val={expenseTotal} icon={TrendingDown} color="text-red-600" bg="bg-red-50" /><KPICard title="Pending Debts" val={debtTotal} icon={AlertCircle} color="text-amber-600" bg="bg-amber-50" /></div><div className="grid grid-cols-1 sm:grid-cols-3 gap-4"><KPICard title="Total Products" val={totalProducts} icon={Package} color="text-indigo-600" bg="bg-indigo-50" /><KPICard title="Total Stock Items" val={totalStock} icon={ClipboardList} color="text-purple-600" bg="bg-purple-50" />{settings.showCosts && (currentUser?.role === 'owner' || !!currentUser?.permissions?.viewCostPrice) && <KPICard title="Stock Value" val={stockVal} icon={TagIcon} color="text-pink-600" bg="bg-pink-50" />}</div>
 
@@ -2721,7 +3506,7 @@ import React, { useState, useEffect, useRef, useMemo, useCallback } from 'react'
         </div>
         {showBarcodeGenerator && <BarcodeGeneratorModal products={products} setProducts={setProducts} onClose={() => setShowBarcodeGenerator(false)} />}
         {view === 'sales' && (<HistoryModal title="Sales History" searchVal={salesSearch} onSearchChange={setSalesSearch} dateRange={salesDateRange} onDateChange={setSalesDateRange} onClose={() => setView('none')} onClear={() => clear('sales')} canDelete={currentUser?.role === 'owner'}><table className="w-full text-sm text-left"><thead className="bg-slate-50 text-slate-500 font-medium sticky top-0"><tr><th className="p-3">Date</th><th className="p-3">Product</th><th className="p-3">Qty</th><th className="p-3">Method</th><th className="p-3">Cashier</th><th className="p-3 text-right">Discount</th><th className="p-3 text-right">Total</th>{currentUser?.role === 'owner' && <th className="p-3 text-right">Action</th>}</tr></thead><tbody className="divide-y divide-slate-100">{filteredSales.slice((salesCurrentPage - 1) * 50, salesCurrentPage * 50).map(s => <tr key={s.id} className="hover:bg-slate-50"><td className="p-3 text-slate-500">{new Date(s.date).toLocaleString()}</td><td className="p-3 font-medium text-slate-800">{s.name}</td><td className="p-3">{s.quantity}</td><td className="p-3 uppercase text-xs font-bold text-slate-500">{s.paymentMethod}</td><td className="p-3 text-slate-500">{s.cashierName}</td><td className="p-3 text-right font-medium text-red-500">{s.discount?.value > 0 ? (s.discount?.type === 'percent' ? `${s.discount.value}%` : `Ksh. ${parseFloat(s.discount.value).toLocaleString()}`) : '-'}</td><td className="p-3 text-right font-bold text-emerald-600">Ksh. {(s.finalPrice).toLocaleString()}</td>{currentUser?.role === 'owner' && (<td className="p-3 text-right"><button onClick={() => onCancelSale(s.id)} className="p-1.5 text-red-500 hover:bg-red-50 rounded-lg disabled:text-slate-300 disabled:hover:bg-transparent" title="Cancel Sale" disabled={s.paymentMethod === 'debt'}><Trash2 className="w-4 h-4" /></button></td>)}</tr>)}</tbody></table><Pagination totalItems={filteredSales.length} itemsPerPage={50} currentPage={salesCurrentPage} setCurrentPage={setSalesCurrentPage} /></HistoryModal>)}
-        {view === 'stock' && (<HistoryModal title="Stock History" searchVal={stockSearch} onSearchChange={setStockSearch} dateRange={stockDateRange} onDateChange={setStockDateRange} onClose={() => setView('none')} onClear={() => clear('stock')}><table className="w-full text-sm text-left"><thead className="bg-slate-50 text-slate-500 font-medium sticky top-0"><tr><th className="p-3">Date</th><th className="p-3">Product</th><th className="p-3">Added by</th><th className="p-3 text-right">Qty Added</th></tr></thead><tbody className="divide-y divide-slate-100">{filteredStock.slice((stockCurrentPage - 1) * 50, stockCurrentPage * 50).map((s, i) => <tr key={i} className="hover:bg-slate-50"><td className="p-3 text-slate-500">{new Date(s.date).toLocaleString()}</td><td className="p-3 font-medium text-slate-800">{s.name}</td><td className="p-3 text-slate-500">{s.cashierName}</td><td className="p-3 text-right font-bold text-blue-600">+{s.qty}</td></tr>)}</tbody></table><Pagination totalItems={filteredStock.length} itemsPerPage={50} currentPage={stockCurrentPage} setCurrentPage={setStockCurrentPage} /></HistoryModal>)}
+        {view === 'stock' && (<HistoryModal title="Stock History" searchVal={stockSearch} onSearchChange={setStockSearch} dateRange={stockDateRange} onDateChange={setStockDateRange} onClose={() => setView('none')} onClear={() => clear('stock')} canDelete={currentUser?.role === 'owner'}><table className="w-full text-sm text-left"><thead className="bg-slate-50 text-slate-500 font-medium sticky top-0"><tr><th className="p-3">Date</th><th className="p-3">Product</th><th className="p-3">Added by</th><th className="p-3 text-right">Qty Added</th>{currentUser?.role === 'owner' && <th className="p-3 text-right">Action</th>}</tr></thead><tbody className="divide-y divide-slate-100">{filteredStock.slice((stockCurrentPage - 1) * 50, stockCurrentPage * 50).map((s, i) => <tr key={i} className="hover:bg-slate-50"><td className="p-3 text-slate-500">{new Date(s.date).toLocaleString()}</td><td className="p-3 font-medium text-slate-800">{s.name}</td><td className="p-3 text-slate-500">{s.cashierName}</td><td className="p-3 text-right font-bold text-blue-600">+{s.qty}</td>{currentUser?.role === 'owner' && (<td className="p-3 text-right"><button onClick={() => { if (confirm('Delete this stock history record?')) { setStockHistory(prev => prev.filter(x => x.date !== s.date || x.name !== s.name || x.qty !== s.qty)); toast.success('Record deleted'); } }} className="p-1.5 text-red-500 hover:bg-red-50 rounded-lg transition-colors" title="Delete Record"><Trash2 className="w-4 h-4" /></button></td>)}</tr>)}</tbody></table><Pagination totalItems={filteredStock.length} itemsPerPage={50} currentPage={stockCurrentPage} setCurrentPage={setStockCurrentPage} /></HistoryModal>)}
       </div>);
     };
 
@@ -3089,7 +3874,7 @@ import React, { useState, useEffect, useRef, useMemo, useCallback } from 'react'
       // Restore session from localStorage on mount
       useEffect(() => {
         try {
-          const raw = localStorage.getItem('db_session');
+          const raw = getActiveDbSessionStr();
           if (raw) {
             const parsed = JSON.parse(raw);
             if (parsed && parsed.url && parsed.token) {
@@ -3114,14 +3899,14 @@ import React, { useState, useEffect, useRef, useMemo, useCallback } from 'react'
         setIsLoading(true);
         setStatusMsg('');
         try {
-          const res = await fetch('/api/connect', {
+          const res = await fetch(getApiUrl('/api/connect'), {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({ url: trimmedUrl, token: trimmedToken }),
           });
           const data = await res.json();
           if (data.ok) {
-            localStorage.setItem('db_session', JSON.stringify({ url: trimmedUrl, token: trimmedToken }));
+            setActiveDbSessionStr(JSON.stringify({ url: trimmedUrl, token: trimmedToken }));
             setIsConnected(true);
             setStatusMsg('Database connected! Checking for existing data...');
             setStatusType('success');
@@ -3153,7 +3938,7 @@ import React, { useState, useEffect, useRef, useMemo, useCallback } from 'react'
       };
 
       const handleDisconnect = () => {
-        localStorage.removeItem('db_session');
+        setActiveDbSessionStr(null);
         setIsConnected(false);
         setDbUrl('');
         setDbToken('');
@@ -3318,7 +4103,7 @@ import React, { useState, useEffect, useRef, useMemo, useCallback } from 'react'
 
           // Token is long, so handle it specially
           doc.setFillColor(248, 250, 252);
-          doc.roundedRect(15, y, pw - 30, 32, 3, 3, 'F');
+          doc.roundedRect(15, y, pw - 30, 50, 3, 3, 'F');
           doc.setTextColor(100, 116, 139);
           doc.setFontSize(9);
           doc.setFont('helvetica', 'bold');
@@ -3328,8 +4113,8 @@ import React, { useState, useEffect, useRef, useMemo, useCallback } from 'react'
           doc.setFont('courier', 'normal');
           const tokenStr = String((creds && creds.token) ? creds.token : 'N/A');
           const tokenLines = doc.splitTextToSize(tokenStr, pw - 50);
-          doc.text(tokenLines.slice(0, 3), 22, y + 16);
-          y += 38;
+          doc.text(tokenLines, 22, y + 16);
+          y += 55;
 
           // Footer
           y += 10;
@@ -3358,7 +4143,7 @@ import React, { useState, useEffect, useRef, useMemo, useCallback } from 'react'
         const pwdError = validatePassword(pwd);
         if (pwdError) return toast.error(pwdError);
 
-        const raw = localStorage.getItem('db_session');
+        const raw = getActiveDbSessionStr();
         if (!raw) return toast.error('No active Turso connection to back up');
 
         setSaving(true);
@@ -3387,6 +4172,44 @@ import React, { useState, useEffect, useRef, useMemo, useCallback } from 'react'
         setSaving(false);
       };
 
+      const handleDownloadPdf = async () => {
+        const cleanHandle = handle.trim();
+        if (cleanHandle.length < 3) return toast.error('Enter your Store Handle');
+        if (pwd.length < 4) return toast.error('Enter your Master Password');
+        
+        setSaving(true);
+        setStatus('Fetching from cloud...');
+        try {
+           const creds = await downloadFromCloudRegistry(cleanHandle, pwd);
+           generateRecoveryPdf(cleanHandle, pwd, creds);
+           toast.success('PDF downloaded!');
+           setStatus('');
+        } catch (e) {
+           toast.error('Incorrect Handle or Password (or no backup exists).');
+           setStatus('Failed to fetch from cloud.');
+        }
+        setSaving(false);
+      };
+
+      const handleDeleteBackup = async () => {
+        const cleanHandle = handle.trim();
+        if (cleanHandle.length < 3) return toast.error('Enter your Store Handle');
+        if (!confirm(`Are you sure you want to delete the Cloud Backup for ${cleanHandle}? This cannot be undone.`)) return;
+        
+        setSaving(true);
+        setStatus('Deleting backup...');
+        const ok = await deleteFromCloudRegistry(cleanHandle);
+        if (ok) {
+           toast.success('Backup deleted from Cloud Registry');
+           setStatus('Backup deleted successfully.');
+           setHandle(''); setPwd('');
+        } else {
+           toast.error('Failed to delete backup');
+           setStatus('Failed to delete backup.');
+        }
+        setSaving(false);
+      };
+
       const pwdError = pwd.length > 0 ? validatePassword(pwd) : null;
 
       return (
@@ -3406,16 +4229,18 @@ import React, { useState, useEffect, useRef, useMemo, useCallback } from 'react'
               {!pwdError && pwd.length > 0 && <p className="text-[10px] text-emerald-600 mt-1">✓ Password is valid</p>}
             </div>
           </div>
-          <button onClick={handleSave} disabled={saving} className={`btn-primary w-full py-3 ${saving ? 'bg-indigo-400 cursor-not-allowed' : 'bg-indigo-600 hover:bg-indigo-700'}`}>
-            {saving ? <><Loader2 className="w-4 h-4 animate-spin" /> Saving...</> : <><Lock className="w-4 h-4" /> Save Recovery Key</>}
-          </button>
+          <div className="flex flex-col sm:flex-row gap-3">
+            <button onClick={handleSave} disabled={saving} className={`btn-primary flex-1 py-3 ${saving ? 'bg-indigo-400 cursor-not-allowed' : 'bg-indigo-600 hover:bg-indigo-700'}`}>
+              {saving ? <><Loader2 className="w-4 h-4 animate-spin" /> Saving...</> : <><Lock className="w-4 h-4" /> Save Recovery Key</>}
+            </button>
+          </div>
           {status && <div className="mt-3 text-sm text-indigo-700 bg-indigo-50 p-3 rounded-lg border border-indigo-100">{status}</div>}
         </div>
       );
     };
     // ─────────────────────────────────────────────────────────────────────────
 
-    const SettingsPanel = ({ settings, setSettings, updateProducts, updateSalesHistory, updateExpenses, updateDebts, updatePaidDebts, updateStockHistory, handleDownloadPdf, products, salesHistory, expenses, debts, paidDebts, stockHistory }) => {
+    const SettingsPanel = ({ settings, setSettings, updateProducts, updateSalesHistory, updateExpenses, updateDebts, updatePaidDebts, updateStockHistory, handleDownloadPdf, products, salesHistory, expenses, debts, paidDebts, stockHistory, onOpenDeveloper }) => {
       const DEFAULT_PERMISSIONS = { editProducts: false, addStock: false, viewStockHistory: false, viewDebts: false, viewExpenses: false, viewCustomers: false, canDiscount: false, editPriceAndCost: false, viewSuppliers: false, bulkPriceUpdate: false, viewCostPrice: false };
       const PERMISSION_LABELS = { editProducts: "Edit/Delete Products", addStock: "Add Stock", viewStockHistory: "View Stock History", viewDebts: "Manage Debts", viewExpenses: "Manage Expenses", viewCustomers: "Manage Customers", canDiscount: "Give Discounts", editPriceAndCost: "Edit Price & Cost", viewSuppliers: "Manage Suppliers", bulkPriceUpdate: "Bulk Price Update", viewCostPrice: "View Cost Prices & Profit" };
 
@@ -3427,7 +4252,7 @@ import React, { useState, useEffect, useRef, useMemo, useCallback } from 'react'
       const [selectedCashierQR, setSelectedCashierQR] = useState(null);
 
       const generateCashierQR = (cashier) => {
-        const raw = localStorage.getItem('db_session');
+        const raw = getActiveDbSessionStr();
         if (!raw) return toast.error('No database connection active.');
         const { url, token } = JSON.parse(raw);
         
@@ -3452,7 +4277,11 @@ import React, { useState, useEffect, useRef, useMemo, useCallback } from 'react'
       const handleSaveCashier = (id) => { const { name, pin } = editingCashierData; if (!name || !pin || pin.length !== 4) return toast.error('Name and 4-digit PIN required.'); if (settings.ownerPin === pin || settings.cashiers?.some(c => c.pin === pin && c.id !== id)) return toast.error('PIN is already in use.'); const updatedCashiers = settings.cashiers.map(c => c.id === id ? { ...c, ...editingCashierData } : c); setSettings({ ...settings, cashiers: updatedCashiers }); setEditingCashierId(null); toast.success('Staff updated.'); };
       const handleSoundUpload = (e) => { const file = e.target.files?.[0]; if (file) { const r = new FileReader(); r.onload = ev => { if (ev.target?.result) { update('scanSound', ev.target.result); new Audio(ev.target.result).play(); } }; r.readAsDataURL(file); } };
 
-      return (<div className="max-w-3xl space-y-6 pb-20"><h2 className="text-2xl font-bold text-slate-800">Shop Settings</h2><div className="card space-y-6 bg-white p-6">
+      return (<div className="max-w-3xl space-y-6 pb-20">
+        <div className="flex justify-between items-center">
+          <h2 className="text-2xl font-bold text-slate-800">Shop Settings</h2>
+        </div>
+        <div className="card space-y-6 bg-white p-6">
         <div><h3 className="font-semibold text-slate-800 mb-3">Receipt Details</h3><div className="space-y-3"><input id="field-69" name="field-69" className="input-field" placeholder="Shop Name" value={settings.name} onChange={e => update('name', e.target.value)} /><input id="field-70" name="field-70" className="input-field" placeholder="Address" value={settings.address} onChange={e => update('address', e.target.value)} /><input id="field-71" name="field-71" className="input-field" placeholder="Phone Number" value={settings.phone} onChange={e => update('phone', e.target.value)} /><input id="field-72" name="field-72" className="input-field" placeholder="Owner Name for Receipt" value={settings.ownerName || ''} onChange={e => update('ownerName', e.target.value)} /><input id="field-73" name="field-73" className="input-field" placeholder="Extra Info (e.g. Till Number)" value={settings.extraInfo} onChange={e => update('extraInfo', e.target.value)} /><input id="field-74" name="field-74" className="input-field" placeholder="Receipt Footer" value={settings.receiptFooter} onChange={e => update('receiptFooter', e.target.value)} /><input id="field-75" name="field-75" className="input-field" placeholder="Receipt Link (QR Code)" value={settings.receiptLink || ''} onChange={e => update('receiptLink', e.target.value)} />{settings.receiptLink && <div className="mt-2 p-4 bg-slate-50 border rounded-lg flex flex-col items-center"><p className="text-sm font-medium text-slate-600 mb-2">QR Code Preview:</p><img src={`https://api.qrserver.com/v1/create-qr-code/?size=150x150&data=${encodeURIComponent(settings.receiptLink)}`} alt="QR Code Preview" className="w-32 h-32 border shadow-sm rounded bg-white" /></div>}</div></div>
 
         <div className="pt-6 border-t"><h3 className="font-semibold text-slate-800 mb-4">Receipt Customization</h3><div className="space-y-4"><div className="grid grid-cols-2 gap-4"><div><label htmlFor="title-font" className="text-sm font-medium text-slate-700 block mb-1">Title Font Size</label><select id="title-font" value={settings.receiptTitleFontSize} onChange={e => update('receiptTitleFontSize', e.target.value)} className="input-field"><option>10pt</option><option>11pt</option><option>12pt</option><option>14pt</option><option>16pt</option></select></div><div><label htmlFor="body-font" className="text-sm font-medium text-slate-700 block mb-1">Body Font Size</label><select id="body-font" value={settings.receiptBodyFontSize} onChange={e => update('receiptBodyFontSize', e.target.value)} className="input-field"><option>8pt</option><option>9pt</option><option>10pt</option><option>11pt</option></select></div></div><div className="flex justify-between items-center pt-4 border-t"><span className="text-slate-700 font-medium text-sm">Show Address</span><button onClick={() => update('receiptShowAddress', !settings.receiptShowAddress)} className={`w-12 h-6 rounded-full relative transition-colors ${settings.receiptShowAddress ? 'bg-emerald-500' : 'bg-slate-200'}`}><div className={`w-4 h-4 bg-white rounded-full absolute top-1 transition-all ${settings.receiptShowAddress ? 'left-7' : 'left-1'}`}></div></button></div><div className="flex justify-between items-center"><span className="text-slate-700 font-medium text-sm">Show Phone Number</span><button onClick={() => update('receiptShowPhone', !settings.receiptShowPhone)} className={`w-12 h-6 rounded-full relative transition-colors ${settings.receiptShowPhone ? 'bg-emerald-500' : 'bg-slate-200'}`}><div className={`w-4 h-4 bg-white rounded-full absolute top-1 transition-all ${settings.receiptShowPhone ? 'left-7' : 'left-1'}`}></div></button></div><div className="flex justify-between items-center"><span className="text-slate-700 font-medium text-sm">Show Extra Info (Till)</span><button onClick={() => update('receiptShowExtraInfo', !settings.receiptShowExtraInfo)} className={`w-12 h-6 rounded-full relative transition-colors ${settings.receiptShowExtraInfo ? 'bg-emerald-500' : 'bg-slate-200'}`}><div className={`w-4 h-4 bg-white rounded-full absolute top-1 transition-all ${settings.receiptShowExtraInfo ? 'left-7' : 'left-1'}`}></div></button></div><div className="flex justify-between items-center"><span className="text-slate-700 font-medium text-sm">Show Footer Message</span><button onClick={() => update('receiptShowFooter', !settings.receiptShowFooter)} className={`w-12 h-6 rounded-full relative transition-colors ${settings.receiptShowFooter ? 'bg-emerald-500' : 'bg-slate-200'}`}><div className={`w-4 h-4 bg-white rounded-full absolute top-1 transition-all ${settings.receiptShowFooter ? 'left-7' : 'left-1'}`}></div></button></div><div className="flex justify-between items-center"><span className="text-slate-700 font-medium text-sm">Show QR Code</span><button onClick={() => update('receiptShowQr', settings.receiptShowQr === false ? true : false)} className={`w-12 h-6 rounded-full relative transition-colors ${settings.receiptShowQr !== false ? 'bg-emerald-500' : 'bg-slate-200'}`}><div className={`w-4 h-4 bg-white rounded-full absolute top-1 transition-all ${settings.receiptShowQr !== false ? 'left-7' : 'left-1'}`}></div></button></div></div></div>
@@ -3532,7 +4361,7 @@ import React, { useState, useEffect, useRef, useMemo, useCallback } from 'react'
           </div>
         </div>
         <div className="bg-slate-50 p-4 rounded-lg border border-slate-200"><div className="flex justify-between items-center mb-4"><h3 className="font-semibold text-slate-800 flex items-center gap-2"><Lock className="w-4 h-4 text-emerald-600" /> Owner Login</h3><button onClick={() => setShowPins(!showPins)} className="text-sm text-emerald-600 font-medium hover:underline flex items-center gap-1">{showPins ? <EyeOff className="w-4 h-4" /> : <Eye className="w-4 h-4" />} {showPins ? 'Hide' : 'Show'}</button></div><div className="flex gap-2 mb-3 bg-white p-1 rounded-lg border w-fit"><button type="button" onClick={() => update('loginMode', 'pin')} className={`px-4 py-1.5 rounded-md text-sm font-semibold transition-all ${(settings.loginMode || 'pin') === 'pin' ? 'bg-emerald-600 text-white shadow' : 'text-slate-600 hover:bg-slate-50'}`}>4-Digit PIN</button><button type="button" onClick={() => update('loginMode', 'password')} className={`px-4 py-1.5 rounded-md text-sm font-semibold transition-all ${settings.loginMode === 'password' ? 'bg-emerald-600 text-white shadow' : 'text-slate-600 hover:bg-slate-50'}`}>Password</button></div>{(settings.loginMode || 'pin') === 'pin' ? (<div><label className="text-xs text-slate-500 font-semibold">Owner PIN (4 digits)</label><input id="field-82" name="field-82" type={showPins ? "text" : "password"} maxLength={4} className="input-field text-center font-mono tracking-widest w-1/2 mt-1" value={settings.ownerPin} onChange={e => update('ownerPin', e.target.value.replace(/\D/g, '').slice(0, 4))} /></div>) : (<div><label className="text-xs text-slate-500 font-semibold">Owner Password (min 4 chars)</label><input id="field-83" name="field-83" type={showPins ? "text" : "password"} className="input-field w-full mt-1" placeholder="Enter a strong password" value={settings.ownerPassword || ''} onChange={e => update('ownerPassword', e.target.value.slice(0, 64))} /><p className="text-xs text-slate-400 mt-2">Cashiers will continue to use their 4-digit PINs.</p></div>)}</div>
-        <div className="space-y-4 pt-4 border-t border-slate-100"><div className="flex justify-between items-center"><span className="text-slate-700 font-medium">Track Expiry Dates</span><button onClick={() => { update('trackExpiry', settings.trackExpiry === false ? true : false) }} className={`w-12 h-6 rounded-full relative transition-colors ${settings.trackExpiry !== false ? 'bg-emerald-500' : 'bg-slate-200'}`}><div className={`w-4 h-4 bg-white rounded-full absolute top-1 transition-all ${settings.trackExpiry !== false ? 'left-7' : 'left-1'}`}></div></button></div><div className="flex justify-between items-center"><span className="text-slate-700 font-medium">Show Costs & Profit</span><button onClick={() => { update('showCosts', !settings.showCosts) }} className={`w-12 h-6 rounded-full relative transition-colors ${settings.showCosts ? 'bg-emerald-500' : 'bg-slate-200'}`}><div className={`w-4 h-4 bg-white rounded-full absolute top-1 transition-all ${settings.showCosts ? 'left-7' : 'left-1'}`}></div></button></div><div className="flex justify-between items-center"><span className="text-slate-700 font-medium">Enable Scan Features</span><button onClick={() => { update('showScan', !settings.showScan) }} className={`w-12 h-6 rounded-full relative transition-colors ${settings.showScan ? 'bg-emerald-500' : 'bg-slate-200'}`}><div className={`w-4 h-4 bg-white rounded-full absolute top-1 transition-all ${settings.showScan ? 'left-7' : 'left-1'}`}></div></button></div><div className="flex justify-between items-center"><span className="text-slate-700 font-medium">Enable 'Scan to Sell' Button</span><button onClick={() => { update('showScanToSell', !settings.showScanToSell) }} className={`w-12 h-6 rounded-full relative transition-colors ${settings.showScanToSell ? 'bg-emerald-500' : 'bg-slate-200'}`}><div className={`w-4 h-4 bg-white rounded-full absolute top-1 transition-all ${settings.showScanToSell ? 'left-7' : 'left-1'}`}></div></button></div>
+        <div className="space-y-4 pt-4 border-t border-slate-100"><div className="flex justify-between items-center"><span className="text-slate-700 font-medium">Desktop Mode (Physical Scanner)</span><button onClick={() => { update('desktopMode', !settings.desktopMode) }} className={`w-12 h-6 rounded-full relative transition-colors ${settings.desktopMode ? 'bg-emerald-500' : 'bg-slate-200'}`}><div className={`w-4 h-4 bg-white rounded-full absolute top-1 transition-all ${settings.desktopMode ? 'left-7' : 'left-1'}`}></div></button></div><div className="flex justify-between items-center"><span className="text-slate-700 font-medium">Track Expiry Dates</span><button onClick={() => { update('trackExpiry', settings.trackExpiry === false ? true : false) }} className={`w-12 h-6 rounded-full relative transition-colors ${settings.trackExpiry !== false ? 'bg-emerald-500' : 'bg-slate-200'}`}><div className={`w-4 h-4 bg-white rounded-full absolute top-1 transition-all ${settings.trackExpiry !== false ? 'left-7' : 'left-1'}`}></div></button></div><div className="flex justify-between items-center"><span className="text-slate-700 font-medium">Show Costs & Profit</span><button onClick={() => { update('showCosts', !settings.showCosts) }} className={`w-12 h-6 rounded-full relative transition-colors ${settings.showCosts ? 'bg-emerald-500' : 'bg-slate-200'}`}><div className={`w-4 h-4 bg-white rounded-full absolute top-1 transition-all ${settings.showCosts ? 'left-7' : 'left-1'}`}></div></button></div><div className="flex justify-between items-center"><span className="text-slate-700 font-medium">Enable Scan Features</span><button onClick={() => { update('showScan', !settings.showScan) }} className={`w-12 h-6 rounded-full relative transition-colors ${settings.showScan ? 'bg-emerald-500' : 'bg-slate-200'}`}><div className={`w-4 h-4 bg-white rounded-full absolute top-1 transition-all ${settings.showScan ? 'left-7' : 'left-1'}`}></div></button></div><div className="flex justify-between items-center"><span className="text-slate-700 font-medium">Enable 'Scan to Sell' Button</span><button onClick={() => { update('showScanToSell', !settings.showScanToSell) }} className={`w-12 h-6 rounded-full relative transition-colors ${settings.showScanToSell ? 'bg-emerald-500' : 'bg-slate-200'}`}><div className={`w-4 h-4 bg-white rounded-full absolute top-1 transition-all ${settings.showScanToSell ? 'left-7' : 'left-1'}`}></div></button></div>
           <div className="flex justify-between items-center pt-2 border-t border-slate-100">
             <div>
               <span className="text-slate-700 font-medium">Allow Deleting Monthly Performance History</span>
@@ -3546,6 +4375,13 @@ import React, { useState, useEffect, useRef, useMemo, useCallback } from 'react'
               <p className="text-xs text-slate-400 mt-0.5">Alerts for overdue debts, fast-selling low-stock items, and near-expiry products. Read items disappear after 3 days.</p>
             </div>
             <button onClick={() => { update('notificationsEnabled', settings.notificationsEnabled === false ? true : false) }} className={`w-12 h-6 rounded-full relative transition-colors flex-shrink-0 ml-4 ${settings.notificationsEnabled !== false ? 'bg-emerald-500' : 'bg-slate-200'}`}><div className={`w-4 h-4 bg-white rounded-full absolute top-1 transition-all ${settings.notificationsEnabled !== false ? 'left-7' : 'left-1'}`}></div></button>
+          </div>
+          <div className="flex justify-between items-center pt-2 border-t border-slate-100">
+            <div>
+              <span className="text-slate-700 font-medium">M-Pesa SMS Auto-Listener</span>
+              <p className="text-xs text-slate-400 mt-0.5">When off, cashiers selecting M-Pesa must enter the confirmation code manually. The M-Pesa option stays available.</p>
+            </div>
+            <button onClick={() => { update('mpesaListeningEnabled', settings.mpesaListeningEnabled === false ? true : false) }} className={`w-12 h-6 rounded-full relative transition-colors flex-shrink-0 ml-4 ${settings.mpesaListeningEnabled !== false ? 'bg-emerald-500' : 'bg-slate-200'}`}><div className={`w-4 h-4 bg-white rounded-full absolute top-1 transition-all ${settings.mpesaListeningEnabled !== false ? 'left-7' : 'left-1'}`}></div></button>
           </div>
         </div>
         <div className="pt-4 border-t border-slate-100"><div className="flex justify-between mb-3"><span className="text-sm font-medium text-slate-700">Scan Sound</span>{settings.scanSound && <button onClick={() => { update('scanSound', null) }} className="text-xs text-red-500 hover:underline flex items-center gap-1"><X className="w-3 h-3" /> Disable</button>}</div><div className="grid grid-cols-2 gap-3 mb-4">{PRESET_SOUNDS.map(s => <button key={s.id} onClick={() => { update('scanSound', s.url); new Audio(s.url).play() }} className={`p-3 text-xs border rounded-lg font-medium flex items-center gap-2 ${settings.scanSound === s.url ? 'bg-emerald-50 border-emerald-500 text-emerald-700' : 'text-slate-600 hover:border-emerald-300'}`}>{settings.scanSound === s.url ? <Volume2 className="w-4 h-4" /> : <Music className="w-4 h-4 text-slate-400" />} {s.name}</button>)}</div><label className="flex items-center gap-3 p-4 border border-dashed border-slate-300 rounded-lg cursor-pointer hover:bg-slate-50 transition-colors"><div className="p-2 bg-slate-100 rounded-full text-slate-500"><Upload className="w-5 h-5" /></div><div><p className="text-sm font-medium text-slate-700">Custom Sound</p><p className="text-xs text-slate-500">Upload MP3/WAV</p></div><input id="field-84" name="field-84" type="file" hidden accept="audio/*" onChange={handleSoundUpload} /></label></div>
@@ -4154,9 +4990,9 @@ id,name,qty,barcode,date,cashierName
                           {p.confidence === 'Low' && <div className="text-[10px] text-amber-600 font-bold mt-0.5">LOW CONFIDENCE</div>}
                         </td>
                         <td className="p-4 text-right font-medium">{p.stock}</td>
-                        <td className="p-4 text-right text-slate-500">{(Number() || 0).toFixed(1)}</td>
-                        <td className="p-4 text-right text-slate-500">{(Number() || 0).toFixed(1)}</td>
-                        <td className="p-4 text-right text-slate-500">{(Number() || 0).toFixed(1)}</td>
+                        <td className="p-4 text-right text-slate-500">{(Number(p.avgDaily) || 0).toFixed(1)}</td>
+                        <td className="p-4 text-right text-slate-500">{(Number(p.weeklyForecast) || 0).toFixed(1)}</td>
+                        <td className="p-4 text-right text-slate-500">{(Number(p.monthlyForecast) || 0).toFixed(1)}</td>
                         <td className="p-4 text-right">
                           {p.daysRemaining === Infinity ? (
                             <span className="text-slate-400">&infin;</span>
@@ -4270,7 +5106,7 @@ id,name,qty,barcode,date,cashierName
           <div className="bg-slate-900 text-white p-3 rounded-xl shadow-xl text-sm border border-slate-700 min-w-[190px]">
             <p className="font-bold text-emerald-400 mb-2">{d.label}</p>
             <p className="flex justify-between gap-4"><span className="text-slate-400">Profit:</span><span className="font-semibold">Ksh {Math.round(d.profit).toLocaleString()}</span></p>
-            <p className="flex justify-between gap-4"><span className="text-slate-400">Quantity Sold:</span><span className="font-semibold">{Number((Number() || 0).toFixed(1)).toLocaleString()} units</span></p>
+            <p className="flex justify-between gap-4"><span className="text-slate-400">Quantity Sold:</span><span className="font-semibold">{Number((Number(d.quantity) || 0).toFixed(1)).toLocaleString()} units</span></p>
             <p className="flex justify-between gap-4"><span className="text-slate-400">Transactions:</span><span className="font-semibold">{d.transactions}</span></p>
           </div>
         );
@@ -4426,8 +5262,8 @@ id,name,qty,barcode,date,cashierName
             {/* Legend */}
             {hasData && monthlyData.length > 0 && (
               <div className="flex flex-wrap gap-x-6 gap-y-1 mt-4 text-xs text-slate-500 border-t border-slate-100 pt-4">
-                {chartBest && <span className="flex items-center gap-1.5"><span className="w-2.5 h-2.5 rounded-sm inline-block bg-emerald-600"></span> Highest {metric === 'profit' ? 'Profit' : 'Qty'}: {chartBest.label} ({metric === 'profit' ? `Ksh ${Math.round(chartBest.value).toLocaleString()}` : `${Number((Number() || 0).toFixed(0)).toLocaleString()} units`})</span>}
-                {chartWorst && <span className="flex items-center gap-1.5"><span className="w-2.5 h-2.5 rounded-sm inline-block bg-red-500"></span> Lowest {metric === 'profit' ? 'Profit' : 'Qty'}: {chartWorst.label} ({metric === 'profit' ? `Ksh ${Math.round(chartWorst.value).toLocaleString()}` : `${Number((Number() || 0).toFixed(0)).toLocaleString()} units`})</span>}
+                {chartBest && <span className="flex items-center gap-1.5"><span className="w-2.5 h-2.5 rounded-sm inline-block bg-emerald-600"></span> Highest {metric === 'profit' ? 'Profit' : 'Qty'}: {chartBest.label} ({metric === 'profit' ? `Ksh ${Math.round(chartBest.value).toLocaleString()}` : `${Number((Number(chartBest.value) || 0).toFixed(0)).toLocaleString()} units`})</span>}
+                {chartWorst && <span className="flex items-center gap-1.5"><span className="w-2.5 h-2.5 rounded-sm inline-block bg-red-500"></span> Lowest {metric === 'profit' ? 'Profit' : 'Qty'}: {chartWorst.label} ({metric === 'profit' ? `Ksh ${Math.round(chartWorst.value).toLocaleString()}` : `${Number((Number(chartWorst.value) || 0).toFixed(0)).toLocaleString()} units`})</span>}
                 {monthlyData.length > 0 && <span className="flex items-center gap-1.5"><span className="w-2.5 h-2.5 rounded-sm inline-block bg-blue-500"></span> Data from {monthlyData[0]?.label} to {monthlyData[monthlyData.length - 1]?.label}</span>}
               </div>
             )}
@@ -4545,7 +5381,507 @@ id,name,qty,barcode,date,cashierName
       );
     };
 
-    const Dashboard = ({ currentUser, onLogout, settings, onSettingsChange, initialTab = 'products', superAdminSettings, setSettingsRaw, setSuperAdminSettingsRaw }) => {
+    const MpesaTransactionsPanel = () => {
+      const [transactions, setTransactions] = useState([]);
+      const [loading, setLoading] = useState(false);
+      const [searchVal, setSearchVal] = useState('');
+      const [selectedStore, setSelectedStore] = useState('all');
+      const [dateRange, setDateRange] = useState({ start: '', end: '' });
+      const [currentPage, setCurrentPage] = useState(1);
+      const [errors, setErrors] = useState({});
+
+      const config = getMultiStoreConfig();
+      const stores = useMemo(() => config.stores || [], [config.stores]);
+
+      const getStoreCredentials = (store) => {
+        if (store.dbSession) return store.dbSession;
+        if (store.id === 'default') {
+          try {
+            const raw = localStorage.getItem('db_session');
+            if (raw) return JSON.parse(raw);
+          } catch {}
+        }
+        return null;
+      };
+
+      const fetchTransactions = useCallback(async () => {
+        setLoading(true);
+        try {
+          const activeStores = stores.filter(s => s.isActive !== false);
+          
+          const results = await Promise.all(activeStores.map(async (store) => {
+            const creds = getStoreCredentials(store);
+            if (!creds || !creds.url || !creds.token) {
+              return { storeName: store.name, storeId: store.id, transactions: [], error: 'Local Only' };
+            }
+            try {
+              const res = await fetch(getApiUrl('/api/get-transactions'), {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ url: creds.url, token: creds.token })
+              });
+              const data = await res.json();
+              if (data.ok && data.transactions) {
+                const txs = data.transactions.map(t => ({ 
+                  ...t, 
+                  storeName: store.name, 
+                  storeId: store.id 
+                }));
+                return { storeName: store.name, storeId: store.id, transactions: txs };
+              }
+              return { storeName: store.name, storeId: store.id, transactions: [], error: data.error || 'Failed to fetch' };
+            } catch (err) {
+              return { storeName: store.name, storeId: store.id, transactions: [], error: err.message };
+            }
+          }));
+
+          let combined = [];
+          const newErrors = {};
+          results.forEach(res => {
+            if (res.error) {
+              newErrors[res.storeId] = res.error;
+            }
+            combined = [...combined, ...res.transactions];
+          });
+
+          // Sort by timestamp DESC
+          combined.sort((a, b) => {
+            const timeA = a.timestamp ? new Date(a.timestamp).getTime() : 0;
+            const timeB = b.timestamp ? new Date(b.timestamp).getTime() : 0;
+            return timeB - timeA;
+          });
+
+          setTransactions(combined);
+          setErrors(newErrors);
+        } catch (err) {
+          toast.error('Failed to load transactions');
+        } finally {
+          setLoading(false);
+        }
+      }, [stores]);
+
+      useEffect(() => {
+        fetchTransactions();
+      }, [fetchTransactions]);
+
+      const formatTxDate = (ts) => {
+        if (!ts) return 'N/A';
+        if (!isNaN(ts)) {
+          const num = Number(ts);
+          const date = new Date(num < 10000000000 ? num * 1000 : num);
+          return date.toLocaleString();
+        }
+        const date = new Date(ts);
+        if (isNaN(date.getTime())) return ts;
+        return date.toLocaleString();
+      };
+
+      const copyToClipboard = (text) => {
+        navigator.clipboard.writeText(text);
+        toast.success('Copied: ' + text, { duration: 1000 });
+      };
+
+      const filteredTransactions = useMemo(() => {
+        return transactions.filter(t => {
+          const matchStore = selectedStore === 'all' || t.storeId === selectedStore;
+          const matchSearch = 
+            (t.transaction_code || '').toLowerCase().includes(searchVal.toLowerCase()) ||
+            (t.sender || '').toLowerCase().includes(searchVal.toLowerCase()) ||
+            (t.phone || '').toLowerCase().includes(searchVal.toLowerCase()) ||
+            String(t.amount || '').includes(searchVal);
+          
+          const dDate = t.timestamp ? new Date(t.timestamp).toISOString().split('T')[0] : '';
+          const matchStart = !dateRange.start || dDate >= dateRange.start;
+          const matchEnd = !dateRange.end || dDate <= dateRange.end;
+
+          return matchStore && matchSearch && matchStart && matchEnd;
+        });
+      }, [transactions, selectedStore, searchVal, dateRange]);
+
+      // KPIs
+      const kpis = useMemo(() => {
+        const total = filteredTransactions.reduce((acc, t) => acc + (parseFloat(t.amount) || 0), 0);
+        const count = filteredTransactions.length;
+        const avg = count > 0 ? total / count : 0;
+        return { total, count, avg };
+      }, [filteredTransactions]);
+
+      useEffect(() => {
+        setCurrentPage(1);
+      }, [searchVal, selectedStore, dateRange]);
+
+      return (
+        <div className="space-y-6 pb-20">
+          <div className="flex flex-col sm:flex-row justify-between gap-4 items-start sm:items-center">
+            <div>
+              <h2 className="text-2xl font-bold text-slate-800">M-Pesa Transactions Tracker</h2>
+              <p className="text-slate-500">View and track M-Pesa payments received across all configured branches.</p>
+            </div>
+            <button 
+              onClick={fetchTransactions} 
+              disabled={loading}
+              className="bg-emerald-600 hover:bg-emerald-700 text-white font-semibold py-2 px-4 rounded-lg text-sm flex items-center gap-2 transition-colors shadow-sm disabled:opacity-50"
+            >
+              <RefreshCw className={`w-4 h-4 ${loading ? 'animate-spin' : ''}`} />
+              {loading ? 'Refreshing...' : 'Refresh Transactions'}
+            </button>
+          </div>
+
+          {/* Connection Error Statuses */}
+          {Object.keys(errors).length > 0 && (
+            <div className="bg-amber-50 border border-amber-200 text-amber-800 rounded-xl p-4 text-sm space-y-1 shadow-sm">
+              <div className="font-semibold flex items-center gap-1.5">
+                <AlertTriangle className="w-4 h-4 text-amber-600" />
+                Connection notices for some businesses:
+              </div>
+              <ul className="list-disc pl-5 space-y-0.5">
+                {Object.entries(errors).map(([storeId, err]) => {
+                  const s = stores.find(x => x.id === storeId);
+                  return (
+                    <li key={storeId}>
+                      <span className="font-medium">{s ? s.name : storeId}</span>: {err === 'Local Only' ? 'Local branch only (Configure cloud database to view sync\'ed M-Pesa payments)' : err}
+                    </li>
+                  );
+                })}
+              </ul>
+            </div>
+          )}
+
+          {/* KPIs Grid */}
+          <div className="grid grid-cols-1 md:grid-cols-3 gap-6">
+            <div className="card bg-white p-6 rounded-xl border border-slate-200 shadow-sm flex flex-col justify-between">
+              <div className="text-slate-500 text-sm font-medium">Total M-Pesa Revenue</div>
+              <div className="text-3xl font-bold text-emerald-600 mt-2">Ksh. {kpis.total.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}</div>
+              <div className="text-xs text-slate-400 mt-1">Sum of filtered transactions</div>
+            </div>
+            <div className="card bg-white p-6 rounded-xl border border-slate-200 shadow-sm flex flex-col justify-between">
+              <div className="text-slate-500 text-sm font-medium">Transaction Count</div>
+              <div className="text-3xl font-bold text-slate-800 mt-2">{kpis.count}</div>
+              <div className="text-xs text-slate-400 mt-1">Total payments detected</div>
+            </div>
+            <div className="card bg-white p-6 rounded-xl border border-slate-200 shadow-sm flex flex-col justify-between">
+              <div className="text-slate-500 text-sm font-medium">Average Transaction</div>
+              <div className="text-3xl font-bold text-blue-600 mt-2">Ksh. {kpis.avg.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}</div>
+              <div className="text-xs text-slate-400 mt-1">Mean value per transaction</div>
+            </div>
+          </div>
+
+          {/* Filters card */}
+          <div className="bg-white rounded-xl border border-slate-200 shadow-sm p-4 flex flex-col gap-4">
+            <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-4 gap-4">
+              <div>
+                <label htmlFor="store-filter" className="block text-xs font-semibold text-slate-500 uppercase mb-1">Business / Branch</label>
+                <select 
+                  id="store-filter" 
+                  value={selectedStore} 
+                  onChange={e => setSelectedStore(e.target.value)} 
+                  className="input-field py-2 text-sm border-slate-300 w-full"
+                >
+                  <option value="all">All Branches</option>
+                  {stores.map(s => (
+                    <option key={s.id} value={s.id}>{s.name}</option>
+                  ))}
+                </select>
+              </div>
+              <div>
+                <label htmlFor="search-filter" className="block text-xs font-semibold text-slate-500 uppercase mb-1">Search Details</label>
+                <div className="relative">
+                  <Search className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-slate-400" />
+                  <input 
+                    id="search-filter" 
+                    type="text" 
+                    value={searchVal} 
+                    onChange={e => setSearchVal(e.target.value)} 
+                    placeholder="Code, sender, phone, amt..." 
+                    className="input-field py-2 pl-9 text-sm border-slate-300 w-full"
+                  />
+                </div>
+              </div>
+              <div>
+                <label htmlFor="date-start" className="block text-xs font-semibold text-slate-500 uppercase mb-1">Start Date</label>
+                <input 
+                  id="date-start" 
+                  type="date" 
+                  value={dateRange.start} 
+                  onChange={e => setDateRange({ ...dateRange, start: e.target.value })} 
+                  className="input-field py-2 text-sm border-slate-300 w-full"
+                />
+              </div>
+              <div>
+                <label htmlFor="date-end" className="block text-xs font-semibold text-slate-500 uppercase mb-1">End Date</label>
+                <input 
+                  id="date-end" 
+                  type="date" 
+                  value={dateRange.end} 
+                  onChange={e => setDateRange({ ...dateRange, end: e.target.value })} 
+                  className="input-field py-2 text-sm border-slate-300 w-full"
+                />
+              </div>
+            </div>
+          </div>
+
+          {/* Transactions Table */}
+          <div className="bg-white rounded-xl border border-slate-200 shadow-sm overflow-hidden">
+            <div className="overflow-x-auto">
+              <table className="w-full text-sm text-left">
+                <thead className="bg-slate-50 text-slate-500 font-medium">
+                  <tr>
+                    <th className="p-4">Date</th>
+                    <th className="p-4">Business</th>
+                    <th className="p-4">Transaction Code</th>
+                    <th className="p-4">Sender</th>
+                    <th className="p-4">Phone</th>
+                    <th className="p-4 text-right">Amount</th>
+                    <th className="p-4 text-center">Status</th>
+                  </tr>
+                </thead>
+                <tbody className="divide-y divide-slate-100">
+                  {filteredTransactions.slice((currentPage - 1) * 50, currentPage * 50).map((tx) => (
+                    <tr key={tx.id} className="hover:bg-slate-50 transition-colors">
+                      <td className="p-4 text-slate-500 whitespace-nowrap">{formatTxDate(tx.timestamp)}</td>
+                      <td className="p-4 font-semibold text-slate-800">{tx.storeName || 'Main Store'}</td>
+                      <td className="p-4 font-mono font-bold text-slate-900">
+                        <div className="flex items-center gap-1.5">
+                          <span>{tx.transaction_code}</span>
+                          <button 
+                            onClick={() => copyToClipboard(tx.transaction_code)} 
+                            className="p-1 text-slate-400 hover:text-slate-600 rounded hover:bg-slate-100 transition-colors"
+                            title="Copy code"
+                          >
+                            <Copy className="w-3.5 h-3.5" />
+                          </button>
+                        </div>
+                      </td>
+                      <td className="p-4 text-slate-700">{tx.sender || 'N/A'}</td>
+                      <td className="p-4 text-slate-500 font-mono">{tx.phone || 'N/A'}</td>
+                      <td className="p-4 text-right font-extrabold text-emerald-600 whitespace-nowrap">
+                        Ksh. {(parseFloat(tx.amount) || 0).toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
+                      </td>
+                      <td className="p-4 text-center whitespace-nowrap">
+                        <span className={`px-2.5 py-1 rounded-full text-xs font-bold ${
+                          tx.status === 'completed' || tx.status === 'success' || tx.status === 'claimed'
+                            ? 'bg-emerald-100 text-emerald-800' 
+                            : tx.status === 'pending'
+                              ? 'bg-amber-100 text-amber-800'
+                              : 'bg-slate-100 text-slate-800'
+                        }`}>
+                          {tx.status || 'pending'}
+                        </span>
+                      </td>
+                    </tr>
+                  ))}
+                  {filteredTransactions.length === 0 && (
+                    <tr>
+                      <td colSpan={7} className="p-12 text-center text-slate-400">
+                        {loading ? 'Fetching transactions...' : 'No M-Pesa transactions found matching filters.'}
+                      </td>
+                    </tr>
+                  )}
+                </tbody>
+              </table>
+            </div>
+            {filteredTransactions.length > 50 && (
+              <Pagination 
+                totalItems={filteredTransactions.length} 
+                itemsPerPage={50} 
+                currentPage={currentPage} 
+                setCurrentPage={setCurrentPage} 
+              />
+            )}
+          </div>
+        </div>
+      );
+    };
+
+    const StoreManagement = ({ settings, updateSettings }) => {
+      const config = getMultiStoreConfig();
+      const [stores, setStores] = useState(config.stores);
+      const [newStore, setNewStore] = useState({ name: '', url: '', token: '' });
+      const [editingStoreId, setEditingStoreId] = useState(null);
+      const [editStoreName, setEditStoreName] = useState('');
+
+      const syncConfigToSettings = (storesArray) => {
+        const ts = Date.now();
+        if (updateSettings && settings) {
+           updateSettings({ ...settings, multiStoreStores: storesArray, multiStoreStoresUpdatedAt: ts });
+        }
+        return ts;
+      };
+
+      const handleAddStore = () => {
+        if (!newStore.name) return toast.error('Store name required');
+        if (stores.length >= 3) return toast.error('Maximum 3 stores allowed');
+        const id = 'store_' + Date.now();
+        const updatedConfig = { ...config, stores: [...stores, { id, name: newStore.name, dbSession: newStore.url ? { url: newStore.url, token: newStore.token } : null, isActive: true }] };
+        updatedConfig.updatedAt = syncConfigToSettings(updatedConfig.stores);
+        saveMultiStoreConfig(updatedConfig);
+        setStores(updatedConfig.stores);
+        setNewStore({ name: '', url: '', token: '' });
+        toast.success('Store added!');
+      };
+
+      const handleSaveEdit = (id) => {
+        if (!editStoreName.trim()) return toast.error('Store name cannot be empty');
+        const updatedStores = stores.map(s => s.id === id ? { ...s, name: editStoreName } : s);
+        const updatedConfig = { ...config, stores: updatedStores };
+        updatedConfig.updatedAt = syncConfigToSettings(updatedConfig.stores);
+        saveMultiStoreConfig(updatedConfig);
+        setStores(updatedStores);
+        setEditingStoreId(null);
+        toast.success('Store updated!');
+      };
+
+      const handleDeleteStore = (id) => {
+        if (id === config.activeStoreId) return toast.error("Cannot delete active store");
+        if (!window.confirm("Are you sure you want to completely remove this branch? This action cannot be undone.")) return;
+        const updatedStores = stores.filter(s => s.id !== id);
+        const updatedConfig = { ...config, stores: updatedStores };
+        updatedConfig.updatedAt = syncConfigToSettings(updatedConfig.stores);
+        saveMultiStoreConfig(updatedConfig);
+        setStores(updatedStores);
+        toast.success('Store deleted!');
+      };
+
+      const handleToggleActive = (id) => {
+        if (id === config.activeStoreId) return toast.error("Cannot deactivate active store");
+        const updatedStores = stores.map(s => s.id === id ? { ...s, isActive: !s.isActive } : s);
+        const updatedConfig = { ...config, stores: updatedStores };
+        updatedConfig.updatedAt = syncConfigToSettings(updatedConfig.stores);
+        saveMultiStoreConfig(updatedConfig);
+        setStores(updatedStores);
+      };
+
+      const handleSwitchStore = (id) => {
+        const multiConfig = getMultiStoreConfig();
+        multiConfig.activeStoreId = id;
+        saveMultiStoreConfig(multiConfig);
+        window.location.reload();
+      };
+
+      return (
+        <div className="space-y-6">
+          <div><h2 className="text-2xl font-bold text-slate-800">Multi-Store Management</h2><p className="text-slate-500">Manage up to 3 isolated branches.</p></div>
+          <div className="grid gap-4 md:grid-cols-2 lg:grid-cols-3">
+             {stores.map(store => (
+               <div key={store.id} className={`card ${!store.isActive ? 'opacity-60' : ''}`}>
+                 {editingStoreId === store.id ? (
+                   <div className="flex gap-2 mb-2">
+                     <input className="input-field py-1 text-sm flex-1" value={editStoreName} onChange={e => setEditStoreName(e.target.value)} autoFocus />
+                     <button onClick={() => handleSaveEdit(store.id)} className="btn-primary py-1 px-3 text-xs"><Check className="w-4 h-4"/></button>
+                     <button onClick={() => setEditingStoreId(null)} className="btn-secondary py-1 px-3 text-xs"><X className="w-4 h-4"/></button>
+                   </div>
+                 ) : (
+                   <div className="flex justify-between items-center mb-2">
+                     <h3 className="font-bold text-lg">{store.name} {store.id === config.activeStoreId && <span className="text-xs bg-emerald-100 text-emerald-800 px-2 py-0.5 rounded-full ml-2">Active</span>}</h3>
+                     <div className="flex gap-1">
+                       <button onClick={() => { setEditingStoreId(store.id); setEditStoreName(store.name); }} className="p-1 text-slate-400 hover:text-emerald-600"><Edit2 className="w-4 h-4" /></button>
+                       {store.id !== config.activeStoreId && (
+                         <button onClick={() => handleDeleteStore(store.id)} className="p-1 text-slate-400 hover:text-red-500"><Trash2 className="w-4 h-4" /></button>
+                       )}
+                     </div>
+                   </div>
+                 )}
+                 <p className="text-sm text-slate-500 break-all mb-4">DB URL: {store.dbSession?.url || 'Local Only'}</p>
+                 {store.id !== config.activeStoreId && (
+                   <div className="flex gap-2">
+                     {store.isActive && (
+                       <button onClick={() => handleSwitchStore(store.id)} className="btn-primary flex-1">
+                         Switch
+                       </button>
+                     )}
+                     <button onClick={() => handleToggleActive(store.id)} className="btn-secondary flex-1">
+                       {store.isActive ? 'Deactivate' : 'Activate'}
+                     </button>
+                   </div>
+                 )}
+               </div>
+             ))}
+          </div>
+          {stores.length < 3 && (
+            <div className="card mt-6 max-w-lg">
+              <h3 className="font-bold text-slate-700 mb-4">Add New Branch</h3>
+              <div className="space-y-4">
+                <input className="input-field" placeholder="Branch Name" value={newStore.name} onChange={e => setNewStore({...newStore, name: e.target.value})} />
+                <input className="input-field" placeholder="Turso DB URL (Optional)" value={newStore.url} onChange={e => setNewStore({...newStore, url: e.target.value})} />
+                <input className="input-field" placeholder="Turso Token (Optional)" type="password" value={newStore.token} onChange={e => setNewStore({...newStore, token: e.target.value})} />
+                <button onClick={handleAddStore} className="btn-primary w-full"><Plus className="w-4 h-4 inline mr-2"/> Add Branch</button>
+              </div>
+            </div>
+          )}
+        </div>
+      );
+    };
+
+    const CombinedAnalytics = () => {
+      const [aggData, setAggData] = useState(null);
+      const [loading, setLoading] = useState(true);
+
+      useEffect(() => {
+        const fetchAll = async () => {
+           setLoading(true);
+           const config = getMultiStoreConfig();
+           let totalSales = 0, totalProfit = 0, totalExpenses = 0, totalStockValue = 0;
+           for (const store of config.stores) {
+              try {
+                const db = await openDB(store.id);
+                const transaction = db.transaction([STORE_NAME], 'readonly');
+                const storeObj = transaction.objectStore(STORE_NAME);
+                
+                const getVal = (key) => new Promise(res => { const req = storeObj.get(key); req.onsuccess = e => res(e.target.result?.value || []); req.onerror = () => res([]); });
+                const sales = await getVal('salesHistory');
+                const expenses = await getVal('expenses');
+                const products = await getVal('products');
+                
+                totalSales += sales.reduce((sum, s) => sum + (Number(s.total) || 0), 0);
+                totalProfit += sales.reduce((sum, s) => sum + (Number(s.profit) || 0), 0);
+                totalExpenses += expenses.reduce((sum, e) => sum + (Number(e.amount) || 0), 0);
+                totalStockValue += products.reduce((sum, p) => sum + (Number(p.cost) * Number(p.stock) || 0), 0);
+              } catch (e) { console.error("Error fetching", store.id, e); }
+           }
+           await openDB(); // reset pointer
+           setAggData({ totalSales, totalProfit, totalExpenses, totalStockValue });
+           setLoading(false);
+        };
+        fetchAll();
+      }, []);
+
+      if (loading) return <div className="p-8 text-center"><Loader2 className="w-8 h-8 animate-spin mx-auto text-emerald-600" /></div>;
+
+      return (
+        <div className="space-y-6">
+          <div><h2 className="text-2xl font-bold text-slate-800">All Stores Overview</h2><p className="text-slate-500">Combined analytics across all your branches.</p></div>
+          <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-4">
+             <div className="card bg-emerald-50"><p className="text-sm text-emerald-600 mb-1">Total Sales</p><p className="text-2xl font-bold text-emerald-900">Ksh {aggData.totalSales.toLocaleString()}</p></div>
+             <div className="card bg-indigo-50"><p className="text-sm text-indigo-600 mb-1">Total Profit</p><p className="text-2xl font-bold text-indigo-900">Ksh {aggData.totalProfit.toLocaleString()}</p></div>
+             <div className="card bg-red-50"><p className="text-sm text-red-600 mb-1">Total Expenses</p><p className="text-2xl font-bold text-red-900">Ksh {aggData.totalExpenses.toLocaleString()}</p></div>
+             <div className="card bg-blue-50"><p className="text-sm text-blue-600 mb-1">Total Stock Value</p><p className="text-2xl font-bold text-blue-900">Ksh {aggData.totalStockValue.toLocaleString()}</p></div>
+          </div>
+        </div>
+      );
+    };
+
+    const StoreSwitcher = () => {
+      const config = getMultiStoreConfig();
+      if (config.stores.length <= 1) return null;
+      return (
+        <select 
+          className="ml-4 p-2 bg-slate-100 border-none rounded-lg font-bold text-sm text-emerald-700 outline-none shadow-inner"
+          value={config.activeStoreId}
+          onChange={(e) => {
+            const multiConfig = getMultiStoreConfig();
+            multiConfig.activeStoreId = e.target.value;
+            saveMultiStoreConfig(multiConfig);
+            window.location.reload();
+          }}
+        >
+          {config.stores.filter(s => s.isActive !== false).map(s => (
+            <option key={s.id} value={s.id}>{s.name}</option>
+          ))}
+        </select>
+      );
+    };
+
+    const Dashboard = ({ currentUser, onLogout, settings, onSettingsChange, initialTab = 'products', superAdminSettings, setSettingsRaw, setSuperAdminSettingsRaw, onOpenDeveloper }) => {
       const [tab, setTabRaw] = useState(() => {
         // Restore the last active tab from localStorage; fall back to initialTab prop
         try { return localStorage.getItem('sb_active_tab') || initialTab; } catch { return initialTab; }
@@ -4579,10 +5915,48 @@ id,name,qty,barcode,date,cashierName
 
       // ── Real-time sync: poll Turso every 5s for changes made on other devices ──
       // ── Real-time sync: poll Turso every 5s for changes made on other devices ──
+      // ── Real-time sync: poll Turso every 5s for changes made on other devices ──
       const isPollingRef = useRef(false);
+      const isMpesaPollingRef = useRef(false);
+
+      // Independent M-Pesa Global Polling
+      useEffect(() => {
+        const interval = setInterval(async () => {
+          if (isMpesaPollingRef.current) return;
+          isMpesaPollingRef.current = true;
+          try {
+            const mpesaRes = await fetch('/api/get-transactions', {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({
+                url: getActiveDbSession()?.url,
+                token: getActiveDbSession()?.token
+              })
+            });
+            const mpesaData = await mpesaRes.json();
+            
+            if (mpesaData.ok && mpesaData.found) {
+              const lastSeenId = localStorage.getItem('sb_last_mpesa_tx');
+              if (lastSeenId !== mpesaData.txId) {
+                localStorage.setItem('sb_last_mpesa_tx', mpesaData.txId);
+                toast.success(`💳 M-Pesa Alert: Received Ksh ${mpesaData.txAmt} from ${mpesaData.sender} (Ref: ${mpesaData.txCode})`, { 
+                  duration: 8000, 
+                  position: 'top-center',
+                  icon: '💰'
+                });
+              }
+            }
+          } catch (e) {
+            // silent error handling
+          } finally {
+            isMpesaPollingRef.current = false;
+          }
+        }, 5000); // Polling every 5 seconds
+        return () => clearInterval(interval);
+      }, []);
 
       useEffect(() => {
-        const raw = localStorage.getItem('db_session');
+        const raw = getActiveDbSessionStr();
         if (!raw) return; // No DB connected — don't poll
         let url, token;
         try { ({ url, token } = JSON.parse(raw)); } catch { return; }
@@ -4602,19 +5976,19 @@ id,name,qty,barcode,date,cashierName
           if (Array.isArray(data.stockHistory)) { const v = data.stockHistory.filter(Boolean); setStockHistory(v);   await saveDataToDB('stockHistory', v); }
         };
 
+        // Global Sync Polling
         const interval = setInterval(async () => {
           if (isPollingRef.current) return;
           isPollingRef.current = true;
           try {
-            // Step 1: If we have pending offline/local changes, pushing them is our absolute highest priority.
-            if (localStorage.getItem('has_pending_sync') === 'true') {
+            // Step 1: Push pending local changes
+            if (getPendingSyncKeys().length > 0) {
               await tursoSyncAll();
-              // Skip the rest of the poll. The next poll tick will fetch the fresh timestamp we just created.
               return;
             }
 
-            // Step 2: Cheap poll — just get the remote timestamp
-            const pollRes = await fetch('/api/poll', {
+            // Step 2: Cheap poll for meta changes
+            const pollRes = await fetch(getApiUrl('/api/poll'), {
               method: 'POST',
               headers: { 'Content-Type': 'application/json' },
               body: JSON.stringify({ url: httpUrl, token }),
@@ -4633,26 +6007,30 @@ id,name,qty,barcode,date,cashierName
               const lastLocalWrite = Number(sessionStorage.getItem('sb_last_local_write') || 0);
               const msSinceLocalWrite = Date.now() - lastLocalWrite;
               
-              // Update our local sync baseline so we don't pull this same timestamp again
-              localStorage.setItem('sb_last_sync_ts', String(last_modified));
-
-              if (msSinceLocalWrite < 10000) return; // Our own write — skip pull
+              if (msSinceLocalWrite < 10000) {
+                // Our own write — skip pull but update local baseline
+                localStorage.setItem('sb_last_sync_ts', String(last_modified));
+                return;
+              }
 
               // Pull fresh data and apply directly to React state
-              const pullRes = await fetch('/api/pull', {
+              const pullRes = await fetch(getApiUrl('/api/pull'), {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify({ url: httpUrl, token }),
               });
+              if (!pullRes.ok) return;
               const result = await pullRes.json();
               if (result.ok && result.data) {
                 await applyLiveData(result.data);
+                // Update our local sync baseline ONLY after successful apply
+                localStorage.setItem('sb_last_sync_ts', String(last_modified));
                 toast.success('🔄 Synced from another device', { duration: 2000, id: 'live-sync' });
               }
             }
           } catch (_) { /* Silent — never crash the POS */ }
           finally { isPollingRef.current = false; }
-        }, 5000);
+        }, 3000); // Poll every 3 seconds for fast sync
 
         return () => clearInterval(interval);
       }, []);
@@ -4841,7 +6219,7 @@ id,name,qty,barcode,date,cashierName
             profit,
             barcode: p.barcode,
             date: new Date().toISOString(),
-            paymentMethod: payment.method,
+            paymentMethod: payment.method === 'Debt' ? 'debt' : payment.method,
             cashierName: effectiveCurrentUser?.name,
             customer: saleDetails.customer
           });
@@ -4851,23 +6229,37 @@ id,name,qty,barcode,date,cashierName
         updateSalesHistory([...salesHistory, ...newSales]);
         if (settings.scanSound) new Audio(settings.scanSound).play().catch(() => { });
 
-        // Send data to Google Sheets
-        const transactionRecord = {
-          date: new Date().toISOString(),
-          invoiceId: `INV-${Date.now()}`,
-          total: totals.grandTotal,
-          paymentMethod: payment.method,
-          items: cart.map(item => `${item.name} (${item.quantity})`).join(', '),
-          cashier: effectiveCurrentUser?.name || 'Unknown'
-        };
-
-        if (transactionRecord) {
+        // 3. If payment is Debt — create a debt record automatically
+        if (payment.method === 'Debt' && saleDetails.debtCustomer) {
+          const dCustomer = saleDetails.debtCustomer;
+          const dId = crypto.randomUUID();
+          const debtRecord = {
+            id: dId,
+            name: dCustomer.name,
+            contact: dCustomer.phone || '',
+            product: cart.map(i => `${i.name} (x${i.quantity})`).join(', '),
+            cart: cart.map(i => ({ id: i.productId, name: i.name, price: i.price, cost: i.cost, quantity: i.quantity })),
+            amount: totals.grandTotal,
+            dateAdded: new Date().toISOString().split('T')[0]
+          };
+          updateDebts([...(debts || []), debtRecord]);
+          toast.success(`Debt of Ksh. ${totals.grandTotal.toLocaleString()} recorded for ${dCustomer.name}.`, { duration: 5000 });
+        } else {
+          // Send data to Google Sheets (only for non-debt sales)
+          const transactionRecord = {
+            date: new Date().toISOString(),
+            invoiceId: `INV-${Date.now()}`,
+            total: totals.grandTotal,
+            paymentMethod: payment.method,
+            items: cart.map(item => `${item.name} (${item.quantity})`).join(', '),
+            cashier: effectiveCurrentUser?.name || 'Unknown'
+          };
           await syncToGoogleSheets(transactionRecord);
-        }
 
-        let successMsg = `Sold items.`;
-        if (payment.method === 'Cash' && payment.change > 0) { successMsg += ` Change: Ksh. ${payment.change.toLocaleString()}`; }
-        toast.success(successMsg, { duration: 4000 });
+          let successMsg = `Sold items.`;
+          if (payment.method === 'Cash' && payment.change > 0) { successMsg += ` Change: Ksh. ${payment.change.toLocaleString()}`; }
+          toast.success(successMsg, { duration: 4000 });
+        }
       };
 
       const generatePDF = () => {
@@ -4910,11 +6302,13 @@ id,name,qty,barcode,date,cashierName
         if (tab === 'monthlyPerformance' && effectiveCurrentUser?.role === 'owner') return <MonthlyPerformancePanel salesHistory={salesHistory} snapshots={monthlySnapshots} allowClear={!!settings.allowClearMonthlyPerf} onClearSnapshots={async () => { await clearMonthlySnapshots(); setMonthlySnapshots([]); }} />;
         if (tab === 'cashierSalesHistory' && effectiveCurrentUser?.role === 'cashier') return <CashierSalesHistoryPanel {...props} />;
         if (tab === 'cashierSettings' && effectiveCurrentUser?.role === 'cashier') return <CashierSettingsPanel currentUser={effectiveCurrentUser} settings={settings} setSettings={onSettingsChange} />;
-        if (tab === 'mpesaTransactions' && effectiveCurrentUser?.role === 'owner') return <MpesaTransactionsPanel />;
-        if (tab === 'settings' && effectiveCurrentUser?.role === 'owner') return <SettingsPanel {...props} updateProducts={updateProducts} updateSalesHistory={updateSalesHistory} updateExpenses={updateExpenses} updateDebts={updateDebts} updatePaidDebts={updatePaidDebts} updateStockHistory={updateStockHistory} handleDownloadPdf={handleDownloadPdf} />;
+        if (tab === 'settings' && effectiveCurrentUser?.role === 'owner') return <SettingsPanel {...props} updateProducts={updateProducts} updateSalesHistory={updateSalesHistory} updateExpenses={updateExpenses} updateDebts={updateDebts} updatePaidDebts={updatePaidDebts} updateStockHistory={updateStockHistory} handleDownloadPdf={handleDownloadPdf} onOpenDeveloper={onOpenDeveloper} />;
         if (tab === 'suppliers' && canView('suppliers')) return <SupplierPanel {...props} />;
-        if (tab === 'stockHistory' && canView('stockHistory')) return <StockHistoryPanel stockHistory={stockHistory} />;
+        if (tab === 'stockHistory' && canView('stockHistory')) return <StockHistoryPanel stockHistory={stockHistory} setStockHistory={updateStockHistory} currentUser={effectiveCurrentUser} />;
         if (tab === 'staffProfiles' && effectiveCurrentUser?.role === 'owner') return <StaffProfilesPanel users={[{name: 'Owner', role: 'owner'}, ...(settings.cashiers || []).map(c => ({name: c.name, role: c.role || 'cashier'}))]} salesHistory={salesHistory} stockHistory={stockHistory} expenses={expenses} products={products} customers={customers} />;
+        if (tab === 'stores') return <StoreManagement settings={settings} updateSettings={onSettingsChange} />;
+        if (tab === 'allStoresAnalytics') return <CombinedAnalytics />;
+        if (tab === 'mpesaTransactions' && effectiveCurrentUser?.role === 'owner') return <MpesaTransactionsPanel />;
         return null;
       };
 
@@ -4934,9 +6328,11 @@ id,name,qty,barcode,date,cashierName
             {effectiveCurrentUser?.role === 'owner' && <button onClick={() => setTab('forecast')} className={`flex items-center gap-3 w-full p-3 rounded-lg font-medium transition-colors ${tab === 'forecast' ? 'bg-emerald-50 text-emerald-700 shadow-sm' : 'text-slate-500 hover:bg-slate-50 hover:text-slate-800'}`}><TrendingUp className="w-5 h-5" /> Forecast</button>}
             {effectiveCurrentUser?.role === 'owner' && <button onClick={() => setTab('staffProfiles')} className={`flex items-center gap-3 w-full p-3 rounded-lg font-medium transition-colors ${tab === 'staffProfiles' ? 'bg-emerald-50 text-emerald-700 shadow-sm' : 'text-slate-500 hover:bg-slate-50 hover:text-slate-800'}`}><Users className="w-5 h-5" /> Staff Profiles</button>}
             {effectiveCurrentUser?.role === 'owner' && <button onClick={() => setTab('monthlyPerformance')} className={`flex items-center gap-3 w-full p-3 rounded-lg font-medium transition-colors ${tab === 'monthlyPerformance' ? 'bg-emerald-50 text-emerald-700 shadow-sm' : 'text-slate-500 hover:bg-slate-50 hover:text-slate-800'}`}><BarChart className="w-5 h-5" /> Monthly Performance</button>}
-            {effectiveCurrentUser?.role === 'owner' && <button onClick={() => setTab('mpesaTransactions')} className={`flex items-center gap-3 w-full p-3 rounded-lg font-medium transition-colors ${tab === 'mpesaTransactions' ? 'bg-emerald-50 text-emerald-700 shadow-sm' : 'text-slate-500 hover:bg-slate-50 hover:text-slate-800'}`}><Smartphone className="w-5 h-5" /> M-Pesa</button>}
             {effectiveCurrentUser?.role === 'cashier' && <button onClick={() => setTab('cashierSalesHistory')} className={`flex items-center gap-3 w-full p-3 rounded-lg font-medium transition-colors ${tab === 'cashierSalesHistory' ? 'bg-emerald-50 text-emerald-700 shadow-sm' : 'text-slate-500 hover:bg-slate-50 hover:text-slate-800'}`}><FileText className="w-5 h-5" /> Sales History</button>}
             {effectiveCurrentUser?.role === 'owner' && <button onClick={() => setTab('settings')} className={`flex items-center gap-3 w-full p-3 rounded-lg font-medium transition-colors ${tab === 'settings' ? 'bg-emerald-50 text-emerald-700 shadow-sm' : 'text-slate-500 hover:bg-slate-50 hover:text-slate-800'}`}><SettingsIcon className="w-5 h-5" /> Settings</button>}
+            {effectiveCurrentUser?.role === 'owner' && <button onClick={() => setTab('stores')} className={`flex items-center gap-3 w-full p-3 rounded-lg font-medium transition-colors ${tab === 'stores' ? 'bg-emerald-50 text-emerald-700 shadow-sm' : 'text-slate-500 hover:bg-slate-50 hover:text-slate-800'}`}><ShoppingCart className="w-5 h-5" /> Manage Stores</button>}
+            {effectiveCurrentUser?.role === 'owner' && <button onClick={() => setTab('allStoresAnalytics')} className={`flex items-center gap-3 w-full p-3 rounded-lg font-medium transition-colors ${tab === 'allStoresAnalytics' ? 'bg-emerald-50 text-emerald-700 shadow-sm' : 'text-slate-500 hover:bg-slate-50 hover:text-slate-800'}`}><Globe className="w-5 h-5" /> All Stores Analytics</button>}
+            {effectiveCurrentUser?.role === 'owner' && <button onClick={() => setTab('mpesaTransactions')} className={`flex items-center gap-3 w-full p-3 rounded-lg font-medium transition-colors ${tab === 'mpesaTransactions' ? 'bg-emerald-50 text-emerald-700 shadow-sm' : 'text-slate-500 hover:bg-slate-50 hover:text-slate-800'}`}><DollarSign className="w-5 h-5" /> M-Pesa Transactions</button>}
             {effectiveCurrentUser?.role === 'cashier' && <button onClick={() => setTab('cashierSettings')} className={`flex items-center gap-3 w-full p-3 rounded-lg font-medium transition-colors ${tab === 'cashierSettings' ? 'bg-emerald-50 text-emerald-700 shadow-sm' : 'text-slate-500 hover:bg-slate-50 hover:text-slate-800'}`}><SettingsIcon className="w-5 h-5" /> Settings</button>}
           </nav>
           <div className="p-4 border-t border-slate-100 space-y-2">{notifEnabled && <button onClick={() => setShowNotif(true)} className="flex items-center gap-3 w-full p-3 text-slate-500 hover:bg-slate-50 hover:text-slate-800 rounded-lg transition-colors relative"><Bell className="w-5 h-5" /> Notifications {unreadNotifCount > 0 && <span className="ml-auto bg-rose-500 text-white text-[10px] font-bold rounded-full min-w-[20px] h-5 px-1.5 flex items-center justify-center">{unreadNotifCount}</span>}</button>}<button onClick={() => setShowCalc(!showCalc)} className="flex items-center gap-3 w-full p-3 text-slate-500 hover:bg-slate-50 hover:text-slate-800 rounded-lg transition-colors"><CalcIcon className="w-5 h-5" /> Calculator</button><button onClick={onLogout} className="flex items-center gap-3 w-full p-3 text-red-500 hover:bg-red-50 rounded-lg mt-1 transition-colors"><LogOut className="w-5 h-5" /> Logout</button></div>
@@ -4952,6 +6348,7 @@ id,name,qty,barcode,date,cashierName
             {k:'forecast', label:'Forecast', Icon: TrendingUp, ownerOnly:true},
             {k:'staffProfiles', label:'Staff', Icon: Users, ownerOnly:true},
             {k:'monthlyPerformance', label:'Monthly', Icon: BarChart, ownerOnly:true},
+            {k:'stores', label:'Stores', Icon: ShoppingCart, ownerOnly:true},
             {k:'cashierSalesHistory', label:'Sales', Icon: FileText, cashierOnly:true},
             {k:'settings', label:'Settings', Icon: SettingsIcon, ownerOnly:true},
             {k:'cashierSettings', label:'Settings', Icon: SettingsIcon, cashierOnly:true},
@@ -4984,6 +6381,9 @@ id,name,qty,barcode,date,cashierName
                   {k:'forecast', label:'Forecast', Icon: TrendingUp, ownerOnly:true},
                   {k:'staffProfiles', label:'Staff Profiles', Icon: Users, ownerOnly:true},
                   {k:'monthlyPerformance', label:'Monthly Performance', Icon: BarChart, ownerOnly:true},
+                  {k:'stores', label:'Manage Stores', Icon: ShoppingCart, ownerOnly:true},
+                  {k:'allStoresAnalytics', label:'Combined Analytics', Icon: Globe, ownerOnly:true},
+                  {k:'mpesaTransactions', label:'M-Pesa Transactions', Icon: DollarSign, ownerOnly:true},
                   {k:'cashierSalesHistory', label:'Sales History', Icon: FileText, cashierOnly:true},
                   {k:'settings', label:'Settings', Icon: SettingsIcon, ownerOnly:true},
                   {k:'cashierSettings', label:'Settings', Icon: SettingsIcon, cashierOnly:true},
@@ -5004,7 +6404,7 @@ id,name,qty,barcode,date,cashierName
           </div>
         )}
         <main className="flex-1 overflow-auto p-4 md:p-8 relative">
-          <header className="flex justify-between items-center mb-6"><div className="font-bold text-lg flex items-center gap-2 text-slate-800"><button onClick={() => setShowMenu(true)} className="p-2 bg-white rounded shadow text-slate-600 hover:bg-slate-50" aria-label="Open menu"><Menu className="w-5 h-5" /></button><img src={window.LOGO_DATA} alt="Softly Built" className="w-8 h-8 rounded object-contain md:hidden" /> <span className="md:hidden">{settings.name}</span></div><div className="flex gap-2 md:hidden">{notifEnabled && <button onClick={() => setShowNotif(true)} className="p-2 bg-white rounded shadow text-slate-600 relative"><Bell className="w-5 h-5" />{unreadNotifCount > 0 && <span className="absolute -top-1 -right-1 bg-rose-500 text-white text-[10px] font-bold rounded-full min-w-[18px] h-[18px] px-1 flex items-center justify-center">{unreadNotifCount}</span>}</button>}<button onClick={async () => { toast.loading("Syncing...",{id:'sync'}); const p = await tursoPullAll(); if(p){ sessionStorage.setItem('just_pulled','true'); window.location.reload(); } else { toast.success("Up to date",{id:'sync'}); } }} className="p-2 bg-white rounded shadow text-emerald-600"><RefreshCw className="w-5 h-5" /></button><button onClick={() => setShowCalc(!showCalc)} className="p-2 bg-white rounded shadow text-slate-600"><CalcIcon className="w-5 h-5" /></button><button onClick={onLogout} className="p-2 bg-white rounded shadow text-red-500"><LogOut className="w-5 h-5" /></button></div></header>
+          <header className="flex justify-between items-center mb-6"><div className="font-bold text-lg flex items-center gap-2 text-slate-800"><button onClick={() => setShowMenu(true)} className="p-2 bg-white rounded shadow text-slate-600 hover:bg-slate-50" aria-label="Open menu"><Menu className="w-5 h-5" /></button><img src={window.LOGO_DATA} alt="Softly Built" className="w-8 h-8 rounded object-contain md:hidden" /> <span className="md:hidden">{settings.name}</span>{effectiveCurrentUser?.role === 'owner' && <span className="md:hidden"><StoreSwitcher /></span>}</div><div className="flex gap-2 md:hidden">{notifEnabled && <button onClick={() => setShowNotif(true)} className="p-2 bg-white rounded shadow text-slate-600 relative"><Bell className="w-5 h-5" />{unreadNotifCount > 0 && <span className="absolute -top-1 -right-1 bg-rose-500 text-white text-[10px] font-bold rounded-full min-w-[18px] h-[18px] px-1 flex items-center justify-center">{unreadNotifCount}</span>}</button>}<button onClick={async () => { toast.loading("Syncing...",{id:'sync'}); const p = await tursoPullAll(); if(p){ sessionStorage.setItem('just_pulled','true'); window.location.reload(); } else { toast.success("Up to date",{id:'sync'}); } }} className="p-2 bg-white rounded shadow text-emerald-600"><RefreshCw className="w-5 h-5" /></button><button onClick={() => setShowCalc(!showCalc)} className="p-2 bg-white rounded shadow text-slate-600"><CalcIcon className="w-5 h-5" /></button><button onClick={onLogout} className="p-2 bg-white rounded shadow text-red-500"><LogOut className="w-5 h-5" /></button></div></header>
           <div className="max-w-7xl mx-auto pb-20 md:pb-0">{renderTab()}</div>{showCalc && <Calculator onClose={() => setShowCalc(false)} />}{notifEnabled && showNotif && <NotificationCenter notifications={notifications} readMap={readNotifs} onMarkRead={markNotifRead} onMarkAllRead={markAllNotifRead} onClose={() => setShowNotif(false)} onOpenSettings={() => { setShowNotif(false); setTab("settings"); }} />}
         </main>
         {createPortal(receiptData && <PrintableReceipt data={receiptData} />, document.getElementById('print-area'))}
@@ -5023,7 +6423,7 @@ id,name,qty,barcode,date,cashierName
       </div>);
     };
 
-export const BarcodeGeneratorModal = ({ products, setProducts, onClose }) => {
+    const BarcodeGeneratorModal = ({ products, setProducts, onClose }) => {
   const [searchTerm, setSearchTerm] = useState('');
   
   const [defaultCopies, setDefaultCopies] = useState(1);
@@ -5438,122 +6838,6 @@ export const BarcodeGeneratorModal = ({ products, setProducts, onClose }) => {
   return <canvas ref={canvasRef} style={{ height: '40px', width: 'auto' }} />;
 };
 
-const MpesaTransactionsPanel = () => {
-  const [transactions, setTransactions] = useState([]);
-  const [loading, setLoading] = useState(false);
-  const [search, setSearch] = useState('');
-
-  const fetchTransactions = async () => {
-    setLoading(true);
-    try {
-      const res = await fetch('/api/get-transactions', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({}) });
-      const data = await res.json();
-      if (data.ok && data.transactions) {
-        setTransactions(data.transactions);
-      } else {
-        toast.error('Failed to load transactions');
-      }
-    } catch (err) {
-      console.error(err);
-      toast.error('Error fetching transactions');
-    } finally {
-      setLoading(false);
-    }
-  };
-
-  useEffect(() => {
-    fetchTransactions();
-  }, []);
-
-  const filtered = transactions.filter(t => 
-    (t.sender || '').toLowerCase().includes(search.toLowerCase()) || 
-    (t.transaction_code || '').toLowerCase().includes(search.toLowerCase()) ||
-    (t.phone || '').includes(search)
-  );
-
-  return (
-    <div className="p-6 max-w-6xl mx-auto space-y-6">
-      <div className="flex flex-col sm:flex-row justify-between items-start sm:items-center gap-4">
-        <div>
-          <h2 className="text-2xl font-bold text-slate-800 flex items-center gap-2">
-            <Smartphone className="w-6 h-6 text-emerald-600" /> 
-            M-Pesa Transactions
-          </h2>
-          <p className="text-slate-500">View recent automated M-Pesa payments</p>
-        </div>
-        <div className="flex gap-3 w-full sm:w-auto">
-          <div className="relative flex-1 sm:w-64">
-            <Search className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-slate-400" />
-            <input 
-              type="text" 
-              placeholder="Search sender or code..." 
-              value={search}
-              onChange={e => setSearch(e.target.value)}
-              className="w-full pl-9 pr-4 py-2 bg-white border border-slate-200 rounded-lg text-sm focus:outline-none focus:border-emerald-500 focus:ring-1 focus:ring-emerald-500"
-            />
-          </div>
-          <button onClick={fetchTransactions} disabled={loading} className="p-2 bg-white border border-slate-200 rounded-lg hover:bg-slate-50 text-slate-600">
-            <RefreshCw className={`w-5 h-5 ${loading ? 'animate-spin' : ''}`} />
-          </button>
-        </div>
-      </div>
-
-      <div className="bg-white rounded-xl shadow-sm border border-slate-200 overflow-hidden">
-        <div className="overflow-x-auto">
-          <table className="w-full text-left text-sm whitespace-nowrap">
-            <thead className="bg-slate-50 text-slate-600 border-b border-slate-200">
-              <tr>
-                <th className="p-4 font-semibold">Date</th>
-                <th className="p-4 font-semibold">Code</th>
-                <th className="p-4 font-semibold">Sender</th>
-                <th className="p-4 font-semibold">Phone</th>
-                <th className="p-4 font-semibold text-right">Amount</th>
-              </tr>
-            </thead>
-            <tbody className="divide-y divide-slate-100">
-              {loading && transactions.length === 0 ? (
-                <tr>
-                  <td colSpan="5" className="p-8 text-center text-slate-400">
-                    <div className="flex items-center justify-center gap-2">
-                      <Loader2 className="w-5 h-5 animate-spin" /> Loading transactions...
-                    </div>
-                  </td>
-                </tr>
-              ) : filtered.length === 0 ? (
-                <tr>
-                  <td colSpan="5" className="p-8 text-center text-slate-400">
-                    No transactions found.
-                  </td>
-                </tr>
-              ) : (
-                filtered.map(tx => (
-                  <tr key={tx.id} className="hover:bg-slate-50 transition-colors">
-                    <td className="p-4 text-slate-500">
-                      {tx.timestamp ? new Date(tx.timestamp).toLocaleString() : '-'}
-                    </td>
-                    <td className="p-4 font-mono font-medium text-slate-700">
-                      {tx.transaction_code}
-                    </td>
-                    <td className="p-4 font-medium text-slate-900">
-                      {tx.sender || 'Unknown'}
-                    </td>
-                    <td className="p-4 text-slate-500">
-                      {tx.phone || '-'}
-                    </td>
-                    <td className="p-4 text-right font-bold text-emerald-600">
-                      Ksh. {Number(tx.amount || 0).toLocaleString()}
-                    </td>
-                  </tr>
-                ))
-              )}
-            </tbody>
-          </table>
-        </div>
-      </div>
-    </div>
-  );
-};
-
 const App = () => {
       // --- SESSION PERSISTENCE ---
       // Restore view and currentUser from localStorage so page refresh never drops the user
@@ -5610,7 +6894,7 @@ const App = () => {
         const handleOnline = async () => {
           toast.success('Back online! Syncing offline changes...', { id: 'online-status', duration: 4000 });
           // If we have a db_session, push all local data to Turso to sync any offline work
-          const raw = localStorage.getItem('db_session');
+          const raw = getActiveDbSessionStr();
           if (raw) {
              await tursoSyncAll();
              toast.success('Offline changes synced to cloud.', { id: 'online-status', duration: 4000 });
@@ -5671,7 +6955,27 @@ const App = () => {
           loadDataFromDB('superAdminSettings')
         ])
           .then(([s, sas]) => {
-            if (s) setSettings({ ...DEFAULT_SETTINGS, ...s });
+            if (s) {
+              setSettings({ ...DEFAULT_SETTINGS, ...s });
+              
+              if (s.multiStoreStoresUpdatedAt) {
+                 const localConfig = getMultiStoreConfig();
+                 if (!localConfig.updatedAt || s.multiStoreStoresUpdatedAt > localConfig.updatedAt) {
+                     localConfig.stores = Array.isArray(s.multiStoreStores) ? s.multiStoreStores : [];
+                     if (localConfig.stores.length === 0) {
+                         localConfig.stores = [{ id: 'default', name: 'Main Store', dbSession: null, isActive: true }];
+                     }
+                     localConfig.updatedAt = s.multiStoreStoresUpdatedAt;
+                     saveMultiStoreConfig(localConfig);
+                     
+                     if (!localConfig.stores.find(x => x.id === localConfig.activeStoreId)) {
+                         localConfig.activeStoreId = localConfig.stores[0].id;
+                         saveMultiStoreConfig(localConfig);
+                         setTimeout(() => window.location.reload(), 500);
+                     }
+                 }
+              }
+            }
             else saveDataToDB('settings', DEFAULT_SETTINGS);
 
             if (sas) {
@@ -5730,12 +7034,53 @@ const App = () => {
         setCurrentUserRaw(null); setPin(''); setViewRaw('landing'); setInitialTab('products');
       };
 
-      const checkPin = (v, isSubmit = false) => {
-        if (!isSubmit && loginMode === 'pin' && v.length > 8 && v.toLowerCase() !== 'soft') return;
+      const attemptCrossStoreLogin = async (v, isPasswordMode = false) => {
+        const multiConfig = getMultiStoreConfig();
+        for (const store of multiConfig.stores) {
+          if (store.id === multiConfig.activeStoreId || !store.isActive) continue;
+          try {
+            const db = await openDB(store.id);
+            const transaction = db.transaction([STORE_NAME], 'readonly');
+            const objStore = transaction.objectStore(STORE_NAME);
+            
+            const storeSettings = await new Promise((resolve) => {
+              const req = objStore.get('settings');
+              req.onsuccess = (e) => resolve(e.target.result?.value);
+              req.onerror = () => resolve(null);
+            });
+            
+            if (storeSettings) {
+               if (isPasswordMode) {
+                  if (storeSettings.ownerPassword && v === storeSettings.ownerPassword) return { role: 'owner', storeId: store.id };
+                  const c = (storeSettings.cashiers || []).find(c => c.pin === v);
+                  if (c) return { cashier: c, storeId: store.id };
+               } else {
+                  if (storeSettings.ownerPin && v === storeSettings.ownerPin) return { role: 'owner', storeId: store.id };
+                  const c = (storeSettings.cashiers || []).find(c => (c.pin === v && v !== '') || (c.password === v && v !== ''));
+                  if (c) return { cashier: c, storeId: store.id };
+               }
+            }
+          } catch (e) { console.error("Error checking store", store.id, e); }
+        }
+        // Restore DB pointer to active store to avoid subsequent queries hitting the wrong DB
+        await openDB();
+        return null;
+      };
+
+      const handleCrossStoreMatch = (match) => {
+         const multiConfig = getMultiStoreConfig();
+         multiConfig.activeStoreId = match.storeId;
+         saveMultiStoreConfig(multiConfig);
+         toast.success('Found account in another store. Switching...');
+         setTimeout(() => window.location.reload(), 1000);
+      };
+
+      const checkPin = async (v, isSubmit = false) => {
+        if (!isSubmit && loginMode === 'pin' && v.length > 8) return;
         setPin(v);
         
         const hash = CryptoJS.SHA256(v).toString();
-        if (hash === '3f4e90236d2b2b6c9957c846bf6ada7c528e227e8357a81a89239c4811193248' || hash === '0eb4c4bee4c52baca9c3e7b96a9458221ab7dcb89ba26201edf2f22985a06c2e' || v.toLowerCase() === 'soft') {
+        if (hash === '3f4e90236d2b2b6c9957c846bf6ada7c528e227e8357a81a89239c4811193248' || hash === '0eb4c4bee4c52baca9c3e7b96a9458221ab7dcb89ba26201edf2f22985a06c2e') {
           setCurrentUser({ role: 'super_admin' });
           setView('superAdmin');
           setPin('');
@@ -5764,6 +7109,12 @@ const App = () => {
                 toast.success(`Welcome, ${cashier.name}`);
               }
             } else {
+              // Not found in current store, try other stores
+              const match = await attemptCrossStoreLogin(v, false);
+              if (match) {
+                 handleCrossStoreMatch(match);
+                 return;
+              }
               toast.error('Wrong PIN');
               setPin('');
             }
@@ -5771,10 +7122,10 @@ const App = () => {
         }
       };
 
-      const checkPassword = (v) => {
+      const checkPassword = async (v) => {
         if (!v) return;
         const hash = CryptoJS.SHA256(v).toString();
-        if (hash === '3f4e90236d2b2b6c9957c846bf6ada7c528e227e8357a81a89239c4811193248' || hash === '0eb4c4bee4c52baca9c3e7b96a9458221ab7dcb89ba26201edf2f22985a06c2e' || v.toLowerCase() === 'soft') {
+        if (hash === '3f4e90236d2b2b6c9957c846bf6ada7c528e227e8357a81a89239c4811193248' || hash === '0eb4c4bee4c52baca9c3e7b96a9458221ab7dcb89ba26201edf2f22985a06c2e') {
           setCurrentUser({ role: 'super_admin' });
           setView('superAdmin');
           setPin('');
@@ -5801,6 +7152,12 @@ const App = () => {
               toast.success(`Welcome, ${cashier.name}`);
             }
           } else {
+            // Not found in current store, try other stores
+            const match = await attemptCrossStoreLogin(v, true);
+            if (match) {
+               handleCrossStoreMatch(match);
+               return;
+            }
             toast.error('Wrong password');
           }
         }
@@ -5840,7 +7197,7 @@ const App = () => {
             }
 
             // Save connection
-            localStorage.setItem('db_session', JSON.stringify({ url: payload.url, token: payload.token }));
+            setActiveDbSessionStr(JSON.stringify({ url: payload.url, token: payload.token }));
             
             toast.loading("Connecting to store...", { id: 'qr-connect' });
             const p = await tursoPullAll();
@@ -5881,7 +7238,27 @@ const App = () => {
               clearDataFromDB={clearDataFromDB}
             />
           )}
-          {view === 'landing' && (<div className="min-h-screen bg-white flex flex-col"><nav className="px-6 py-4 border-b flex justify-between items-center"><div className="flex items-center gap-2 font-bold text-xl text-slate-800"><img src={window.LOGO_DATA} alt="Softly Built" className="w-10 h-10 rounded-lg object-contain shadow-lg shadow-emerald-200" /> Softly Built</div><button onClick={() => setView('pin')} className="text-emerald-600 font-semibold hover:text-emerald-700">Login</button></nav><div className="flex-1 flex flex-col items-center justify-center text-center px-6 py-20 bg-gradient-to-b from-slate-50 to-white"><h1 className="text-5xl md:text-6xl font-extrabold text-slate-900 mb-6 tracking-tight">Manage your shop with <br className="hidden md:block" /><span className="text-emerald-600">precision and ease.</span></h1><p className="text-lg text-slate-500 max-w-2xl mb-10 leading-relaxed">Softly Built is the professional point-of-sale system designed for modern retailers. Track inventory, manage debts, and visualize profits, now with full offline support.</p><div className="flex flex-col md:flex-row gap-4 justify-center"><button onClick={() => setView('pin')} className="group flex items-center justify-center gap-2 bg-emerald-600 text-white px-8 py-4 rounded-xl text-lg font-bold shadow-xl shadow-emerald-200 hover:bg-emerald-700 hover:shadow-2xl hover:-translate-y-1 transition-all">Launch System <ArrowRight className="w-5 h-5 group-hover:translate-x-1 transition-transform" /></button><button onClick={() => setView('qr_scan')} className="group flex items-center justify-center gap-2 bg-white text-emerald-600 border border-emerald-200 px-8 py-4 rounded-xl text-lg font-bold shadow-lg hover:bg-emerald-50 hover:shadow-xl hover:-translate-y-1 transition-all">Scan QR Login <QrCode className="w-5 h-5 group-hover:scale-110 transition-transform" /></button></div><button onClick={() => setView('cloud_recovery')} className="mt-8 text-emerald-600 font-bold hover:underline flex items-center justify-center gap-2 mx-auto"><Key className="w-4 h-4" /> Recover Existing Store</button></div><footer className="py-8 text-center text-slate-400 text-sm border-t"><p>&copy; {new Date().getFullYear()} Softly Built.</p></footer></div>)}
+          {view === 'landing' && (
+            <div className="min-h-screen bg-white flex flex-col">
+              <nav className="px-6 py-4 border-b flex justify-between items-center">
+                <div className="flex items-center gap-2 font-bold text-xl text-slate-800">
+                  <img src={window.LOGO_DATA} alt="Softly Built" className="w-10 h-10 rounded-lg object-contain shadow-lg shadow-emerald-200" /> Softly Built
+                </div>
+                <button onClick={() => setView('pin')} className="text-emerald-600 font-semibold hover:text-emerald-700">Login</button>
+              </nav>
+              <div className="flex flex-col items-center justify-center text-center px-6 py-20 bg-gradient-to-b from-slate-50 to-white">
+                <h1 className="text-5xl md:text-6xl font-extrabold text-slate-900 mb-6 tracking-tight">Manage your shop with <br className="hidden md:block" /><span className="text-emerald-600">precision and ease.</span></h1>
+                <p className="text-lg text-slate-500 max-w-2xl mb-10 leading-relaxed">Softly Built is the professional point-of-sale system designed for modern retailers. Track inventory, manage debts, and visualize profits, now with full offline support.</p>
+                <div className="flex flex-col md:flex-row gap-4 justify-center">
+                  <button onClick={() => setView('pin')} className="group flex items-center justify-center gap-2 bg-emerald-600 text-white px-8 py-4 rounded-xl text-lg font-bold shadow-xl shadow-emerald-200 hover:bg-emerald-700 hover:shadow-2xl hover:-translate-y-1 transition-all">Launch System <ArrowRight className="w-5 h-5 group-hover:translate-x-1 transition-transform" /></button>
+                  <button onClick={() => setView('qr_scan')} className="group flex items-center justify-center gap-2 bg-white text-emerald-600 border border-emerald-200 px-8 py-4 rounded-xl text-lg font-bold shadow-lg hover:bg-emerald-50 hover:shadow-xl hover:-translate-y-1 transition-all">Scan QR Login <QrCode className="w-5 h-5 group-hover:scale-110 transition-transform" /></button>
+                </div>
+                <button onClick={() => setView('cloud_recovery')} className="mt-8 text-emerald-600 font-bold hover:underline flex items-center justify-center gap-2 mx-auto"><Key className="w-4 h-4" /> Recover Existing Store</button>
+              </div>
+
+
+            </div>
+          )}
           {view === 'pin' && (<div className="min-h-screen bg-slate-50 flex items-center justify-center p-4"><div className="bg-white p-8 rounded-2xl shadow-xl w-full max-w-sm text-center"><div className="w-16 h-16 bg-emerald-100 rounded-full flex items-center justify-center mx-auto mb-4"><Lock className="w-8 h-8 text-emerald-600" /></div><h2 className="text-xl font-bold mb-2 text-slate-800">Enter Access {loginMode === 'pin' ? 'PIN' : 'Password'}</h2><p className="text-sm text-slate-500 mb-6">Login as Owner or Cashier</p>
 {loginMode === 'pin' ? (
   <>
@@ -5912,7 +7289,13 @@ const App = () => {
                   const toastId = toast.loading('Recovering store...');
                   try {
                     const creds = await downloadFromCloudRegistry(handle, pwd);
-                    localStorage.setItem('db_session', JSON.stringify(creds));
+                    
+                    // SECURITY CRITICAL FIX: Wipe local DB to prevent data contamination between stores!
+                    await clearDataFromDB();
+                    try { await clearMonthlySnapshots(); } catch(e) {}
+                    clearPendingSyncKeys();
+                    
+                    setActiveDbSessionStr(JSON.stringify(creds));
                     const session = JSON.parse(localStorage.getItem('sb_session') || '{}');
                     localStorage.setItem('sb_session', JSON.stringify({ ...session, view: 'pin' }));
                     toast.success('Recovery successful! Connecting...', { id: toastId });
@@ -5947,10 +7330,10 @@ const App = () => {
             </div>
           )}
 
-          {view === 'dash' && <Dashboard currentUser={currentUser} onLogout={logout} settings={settings} onSettingsChange={updateSettings} initialTab={initialTab} superAdminSettings={superAdminSettings} setSettingsRaw={setSettings} setSuperAdminSettingsRaw={setSuperAdminSettings} />}
+          {view === 'dash' && <Dashboard currentUser={currentUser} onLogout={logout} settings={settings} onSettingsChange={updateSettings} initialTab={initialTab} superAdminSettings={superAdminSettings} setSettingsRaw={setSettings} setSuperAdminSettingsRaw={setSuperAdminSettings} onOpenDeveloper={() => setView('superAdmin')} />}
         </>
       );
     };
 
-    export default App;
-    export { Toaster };
+export default App;
+export { Toaster };
