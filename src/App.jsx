@@ -7,7 +7,7 @@ import React, { useState, useEffect, useRef, useMemo, useCallback } from 'react'
       FileText, ClipboardList, Lock, Eye, EyeOff, Volume2, Upload, Download, Music,
       Search, AlertTriangle, MessageCircle, AlertCircle, QrCode, Barcode, Zap, Copy,
       Loader2, Delete, Clock, Key, Tag, Printer, UserPlus, ShoppingCart, Percent, Tag as TagIcon, Save,
-      Truck, Bell, Send, Play, Calendar, Menu, RefreshCw
+      Truck, Bell, Send, Play, Calendar, Menu, RefreshCw, Smartphone
     } from 'lucide-react';
     import { BarChart, Bar, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer, Cell } from 'recharts';
     import toast, { Toaster } from 'react-hot-toast';
@@ -244,9 +244,6 @@ import React, { useState, useEffect, useRef, useMemo, useCallback } from 'react'
           if (resJson.ok) {
             // Stamp local write time so the polling loop doesn't re-download our own change
             sessionStorage.setItem('sb_last_local_write', String(Date.now()));
-            if (resJson.last_modified) {
-              localStorage.setItem('sb_last_sync_ts', String(resJson.last_modified));
-            }
             return true;
           }
         }
@@ -2598,6 +2595,7 @@ import React, { useState, useEffect, useRef, useMemo, useCallback } from 'react'
           toast.error("No products to generate PDF.");
           return;
         }
+()
         const today = new Date().toLocaleDateString('en-GB');
         doc.setFontSize(16);
         doc.text(settings.name || 'Products Sheet', 14, 15);
@@ -4632,8 +4630,14 @@ id,name,qty,barcode,date,cashierName
             const lastLocalSync = Number(localStorage.getItem('sb_last_sync_ts') || 0);
             
             if (last_modified > lastLocalSync) {
+              // Grace period: if this device pushed data within the last 10 seconds, it's our own write
+              const lastLocalWrite = Number(sessionStorage.getItem('sb_last_local_write') || 0);
+              const msSinceLocalWrite = Date.now() - lastLocalWrite;
+              
               // Update our local sync baseline so we don't pull this same timestamp again
               localStorage.setItem('sb_last_sync_ts', String(last_modified));
+
+              if (msSinceLocalWrite < 10000) return; // Our own write — skip pull
 
               // Pull fresh data and apply directly to React state
               const pullRes = await fetch('/api/pull', {
@@ -4907,6 +4911,7 @@ id,name,qty,barcode,date,cashierName
         if (tab === 'monthlyPerformance' && effectiveCurrentUser?.role === 'owner') return <MonthlyPerformancePanel salesHistory={salesHistory} snapshots={monthlySnapshots} allowClear={!!settings.allowClearMonthlyPerf} onClearSnapshots={async () => { await clearMonthlySnapshots(); setMonthlySnapshots([]); }} />;
         if (tab === 'cashierSalesHistory' && effectiveCurrentUser?.role === 'cashier') return <CashierSalesHistoryPanel {...props} />;
         if (tab === 'cashierSettings' && effectiveCurrentUser?.role === 'cashier') return <CashierSettingsPanel currentUser={effectiveCurrentUser} settings={settings} setSettings={onSettingsChange} />;
+        if (tab === 'mpesaTransactions' && effectiveCurrentUser?.role === 'owner') return <MpesaTransactionsPanel />;
         if (tab === 'settings' && effectiveCurrentUser?.role === 'owner') return <SettingsPanel {...props} updateProducts={updateProducts} updateSalesHistory={updateSalesHistory} updateExpenses={updateExpenses} updateDebts={updateDebts} updatePaidDebts={updatePaidDebts} updateStockHistory={updateStockHistory} handleDownloadPdf={handleDownloadPdf} />;
         if (tab === 'suppliers' && canView('suppliers')) return <SupplierPanel {...props} />;
         if (tab === 'stockHistory' && canView('stockHistory')) return <StockHistoryPanel stockHistory={stockHistory} />;
@@ -4930,6 +4935,7 @@ id,name,qty,barcode,date,cashierName
             {effectiveCurrentUser?.role === 'owner' && <button onClick={() => setTab('forecast')} className={`flex items-center gap-3 w-full p-3 rounded-lg font-medium transition-colors ${tab === 'forecast' ? 'bg-emerald-50 text-emerald-700 shadow-sm' : 'text-slate-500 hover:bg-slate-50 hover:text-slate-800'}`}><TrendingUp className="w-5 h-5" /> Forecast</button>}
             {effectiveCurrentUser?.role === 'owner' && <button onClick={() => setTab('staffProfiles')} className={`flex items-center gap-3 w-full p-3 rounded-lg font-medium transition-colors ${tab === 'staffProfiles' ? 'bg-emerald-50 text-emerald-700 shadow-sm' : 'text-slate-500 hover:bg-slate-50 hover:text-slate-800'}`}><Users className="w-5 h-5" /> Staff Profiles</button>}
             {effectiveCurrentUser?.role === 'owner' && <button onClick={() => setTab('monthlyPerformance')} className={`flex items-center gap-3 w-full p-3 rounded-lg font-medium transition-colors ${tab === 'monthlyPerformance' ? 'bg-emerald-50 text-emerald-700 shadow-sm' : 'text-slate-500 hover:bg-slate-50 hover:text-slate-800'}`}><BarChart className="w-5 h-5" /> Monthly Performance</button>}
+            {effectiveCurrentUser?.role === 'owner' && <button onClick={() => setTab('mpesaTransactions')} className={`flex items-center gap-3 w-full p-3 rounded-lg font-medium transition-colors ${tab === 'mpesaTransactions' ? 'bg-emerald-50 text-emerald-700 shadow-sm' : 'text-slate-500 hover:bg-slate-50 hover:text-slate-800'}`}><Smartphone className="w-5 h-5" /> M-Pesa</button>}
             {effectiveCurrentUser?.role === 'cashier' && <button onClick={() => setTab('cashierSalesHistory')} className={`flex items-center gap-3 w-full p-3 rounded-lg font-medium transition-colors ${tab === 'cashierSalesHistory' ? 'bg-emerald-50 text-emerald-700 shadow-sm' : 'text-slate-500 hover:bg-slate-50 hover:text-slate-800'}`}><FileText className="w-5 h-5" /> Sales History</button>}
             {effectiveCurrentUser?.role === 'owner' && <button onClick={() => setTab('settings')} className={`flex items-center gap-3 w-full p-3 rounded-lg font-medium transition-colors ${tab === 'settings' ? 'bg-emerald-50 text-emerald-700 shadow-sm' : 'text-slate-500 hover:bg-slate-50 hover:text-slate-800'}`}><SettingsIcon className="w-5 h-5" /> Settings</button>}
             {effectiveCurrentUser?.role === 'cashier' && <button onClick={() => setTab('cashierSettings')} className={`flex items-center gap-3 w-full p-3 rounded-lg font-medium transition-colors ${tab === 'cashierSettings' ? 'bg-emerald-50 text-emerald-700 shadow-sm' : 'text-slate-500 hover:bg-slate-50 hover:text-slate-800'}`}><SettingsIcon className="w-5 h-5" /> Settings</button>}
@@ -5431,6 +5437,122 @@ export const BarcodeGeneratorModal = ({ products, setProducts, onClose }) => {
     }
   }, [value]);
   return <canvas ref={canvasRef} style={{ height: '40px', width: 'auto' }} />;
+};
+
+const MpesaTransactionsPanel = () => {
+  const [transactions, setTransactions] = useState([]);
+  const [loading, setLoading] = useState(false);
+  const [search, setSearch] = useState('');
+
+  const fetchTransactions = async () => {
+    setLoading(true);
+    try {
+      const res = await fetch('/api/get-transactions', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({}) });
+      const data = await res.json();
+      if (data.ok && data.transactions) {
+        setTransactions(data.transactions);
+      } else {
+        toast.error('Failed to load transactions');
+      }
+    } catch (err) {
+      console.error(err);
+      toast.error('Error fetching transactions');
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  useEffect(() => {
+    fetchTransactions();
+  }, []);
+
+  const filtered = transactions.filter(t => 
+    (t.sender || '').toLowerCase().includes(search.toLowerCase()) || 
+    (t.transaction_code || '').toLowerCase().includes(search.toLowerCase()) ||
+    (t.phone || '').includes(search)
+  );
+
+  return (
+    <div className="p-6 max-w-6xl mx-auto space-y-6">
+      <div className="flex flex-col sm:flex-row justify-between items-start sm:items-center gap-4">
+        <div>
+          <h2 className="text-2xl font-bold text-slate-800 flex items-center gap-2">
+            <Smartphone className="w-6 h-6 text-emerald-600" /> 
+            M-Pesa Transactions
+          </h2>
+          <p className="text-slate-500">View recent automated M-Pesa payments</p>
+        </div>
+        <div className="flex gap-3 w-full sm:w-auto">
+          <div className="relative flex-1 sm:w-64">
+            <Search className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-slate-400" />
+            <input 
+              type="text" 
+              placeholder="Search sender or code..." 
+              value={search}
+              onChange={e => setSearch(e.target.value)}
+              className="w-full pl-9 pr-4 py-2 bg-white border border-slate-200 rounded-lg text-sm focus:outline-none focus:border-emerald-500 focus:ring-1 focus:ring-emerald-500"
+            />
+          </div>
+          <button onClick={fetchTransactions} disabled={loading} className="p-2 bg-white border border-slate-200 rounded-lg hover:bg-slate-50 text-slate-600">
+            <RefreshCw className={`w-5 h-5 ${loading ? 'animate-spin' : ''}`} />
+          </button>
+        </div>
+      </div>
+
+      <div className="bg-white rounded-xl shadow-sm border border-slate-200 overflow-hidden">
+        <div className="overflow-x-auto">
+          <table className="w-full text-left text-sm whitespace-nowrap">
+            <thead className="bg-slate-50 text-slate-600 border-b border-slate-200">
+              <tr>
+                <th className="p-4 font-semibold">Date</th>
+                <th className="p-4 font-semibold">Code</th>
+                <th className="p-4 font-semibold">Sender</th>
+                <th className="p-4 font-semibold">Phone</th>
+                <th className="p-4 font-semibold text-right">Amount</th>
+              </tr>
+            </thead>
+            <tbody className="divide-y divide-slate-100">
+              {loading && transactions.length === 0 ? (
+                <tr>
+                  <td colSpan="5" className="p-8 text-center text-slate-400">
+                    <div className="flex items-center justify-center gap-2">
+                      <Loader2 className="w-5 h-5 animate-spin" /> Loading transactions...
+                    </div>
+                  </td>
+                </tr>
+              ) : filtered.length === 0 ? (
+                <tr>
+                  <td colSpan="5" className="p-8 text-center text-slate-400">
+                    No transactions found.
+                  </td>
+                </tr>
+              ) : (
+                filtered.map(tx => (
+                  <tr key={tx.id} className="hover:bg-slate-50 transition-colors">
+                    <td className="p-4 text-slate-500">
+                      {tx.timestamp ? new Date(tx.timestamp).toLocaleString() : '-'}
+                    </td>
+                    <td className="p-4 font-mono font-medium text-slate-700">
+                      {tx.transaction_code}
+                    </td>
+                    <td className="p-4 font-medium text-slate-900">
+                      {tx.sender || 'Unknown'}
+                    </td>
+                    <td className="p-4 text-slate-500">
+                      {tx.phone || '-'}
+                    </td>
+                    <td className="p-4 text-right font-bold text-emerald-600">
+                      Ksh. {Number(tx.amount || 0).toLocaleString()}
+                    </td>
+                  </tr>
+                ))
+              )}
+            </tbody>
+          </table>
+        </div>
+      </div>
+    </div>
+  );
 };
 
 const App = () => {
