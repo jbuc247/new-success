@@ -2595,7 +2595,6 @@ import React, { useState, useEffect, useRef, useMemo, useCallback } from 'react'
           toast.error("No products to generate PDF.");
           return;
         }
-()
         const today = new Date().toLocaleDateString('en-GB');
         doc.setFontSize(16);
         doc.text(settings.name || 'Products Sheet', 14, 15);
